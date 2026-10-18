@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync, type SQLInputValue, type SQLOutputValue } from "node:sqlite";
 import { PGlite } from "@electric-sql/pglite";
+import { MB, POSTGRES_SETTINGS } from "../src/postgres-settings.ts";
 import { StorageFS, type SqlExec, type SqlValue } from "../src/storage-fs.ts";
 
 const DB_FILE = join(tmpdir(), "pgbox-storage-fs-test.sqlite");
@@ -12,8 +13,8 @@ const BATCHES = 10;
 const ROWS_PER_BATCH = 25_000;
 const LOOKUP_ID = 123_456;
 const UPDATED_ID = 7;
-const POSTGRES_SETTINGS = ["shared_buffers = 16MB", "work_mem = 2MB", "maintenance_work_mem = 8MB", "temp_buffers = 2MB", "wal_buffers = 1MB"];
-const MB = 1024 * 1024;
+const SHORT_FILE_BYTES = 100;
+const GROWN_FILE_BYTES = 16_384;
 
 const toInput = (value: SqlValue): SQLInputValue => (value instanceof ArrayBuffer ? new Uint8Array(value) : value);
 const toOutput = (value: SQLOutputValue): SqlValue => (typeof value === "bigint" ? Number(value) : value);
@@ -44,6 +45,7 @@ async function freshDatabaseLoadsTemplateAndTakesWrites() {
   const pg = await timed("fresh boot from template", () =>
     PGlite.create({ fs, loadDataDir: new Blob([readFileSync(TEMPLATE)]), postgresqlconf: POSTGRES_SETTINGS }),
   );
+  fs.markInitialized();
   assert.equal(fs.isInitialized(), true);
   await pg.exec("create table t(id serial primary key, v text)");
   await timed(`insert ${BATCHES * ROWS_PER_BATCH} rows`, async () => {
@@ -75,6 +77,21 @@ async function reopenSeesEveryRowAndPersistsUpdates() {
   again.db.close();
 }
 
+function growingAFileReadsZerosPastOldEnd() {
+  const { db, fs } = openStorage();
+  const fd = fs.open("/grow-test");
+  fs.write(fd, new Uint8Array(SHORT_FILE_BYTES).fill(1), 0, SHORT_FILE_BYTES, 0);
+  fs.truncate("/grow-test", GROWN_FILE_BYTES);
+  const buffer = new Uint8Array(GROWN_FILE_BYTES).fill(9);
+  assert.equal(fs.read(fd, buffer, 0, GROWN_FILE_BYTES, 0), GROWN_FILE_BYTES);
+  assert.ok(buffer.subarray(0, SHORT_FILE_BYTES).every((b) => b === 1));
+  assert.ok(buffer.subarray(SHORT_FILE_BYTES).every((b) => b === 0));
+  fs.close(fd);
+  fs.unlink("/grow-test");
+  db.close();
+}
+
 rmSync(DB_FILE, { force: true });
+growingAFileReadsZerosPastOldEnd();
 await freshDatabaseLoadsTemplateAndTakesWrites();
 await reopenSeesEveryRowAndPersistsUpdates();

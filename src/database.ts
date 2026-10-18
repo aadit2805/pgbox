@@ -1,12 +1,11 @@
 import { DurableObject } from "cloudflare:workers";
-import type { PGlite } from "@electric-sql/pglite";
+import { messages, type PGlite } from "@electric-sql/pglite";
 import { createPostgres, wasmMemoryMegabytes } from "./postgres";
 import { StorageFS, type SqlValue } from "./storage-fs";
 
 const TEMPLATE_URL = "https://assets/template.tar.gz";
 
-const toStorageValue = (value: SqlValue): SqlStorageValue =>
-  value instanceof Uint8Array ? value.slice().buffer : value;
+const toStorageValue = (value: SqlValue): SqlStorageValue => (value instanceof Uint8Array ? value.slice().buffer : value);
 
 export interface Env {
   DB: DurableObjectNamespace<Database>;
@@ -26,25 +25,37 @@ export class Database extends DurableObject<Env> {
 
   async query(name: string, sql: string): Promise<QueryResult> {
     const pg = await this.boot(name);
-    const results = await pg.exec(sql);
-    return { rows: results.at(-1)?.rows ?? [], startedFromTemplate: this.startedFromTemplate, wasmMemoryMB: wasmMemoryMegabytes(pg) };
+    try {
+      const results = await pg.exec(sql);
+      return { rows: results.at(-1)?.rows ?? [], startedFromTemplate: this.startedFromTemplate, wasmMemoryMB: wasmMemoryMegabytes(pg) };
+    } catch (err) {
+      if (!(err instanceof messages.DatabaseError)) this.discardPostgres(name, err);
+      throw err;
+    }
   }
 
   private boot(name: string): Promise<PGlite> {
     this.postgres ??= this.start(name).catch((err: unknown) => {
-      this.postgres = undefined;
-      console.error(`postgres boot failed for ${name}:`, err);
+      this.discardPostgres(name, err);
       throw err;
     });
     return this.postgres;
+  }
+
+  private discardPostgres(name: string, err: unknown) {
+    this.postgres = undefined;
+    console.error(`postgres for ${name} discarded after:`, err);
   }
 
   private async start(name: string): Promise<PGlite> {
     const storage = this.ctx.storage.sql;
     const fs = new StorageFS((query, ...bindings) => storage.exec(query, ...bindings.map(toStorageValue)).toArray());
     this.startedFromTemplate = !fs.isInitialized();
+    if (this.startedFromTemplate) fs.clear();
     const template = this.startedFromTemplate ? await this.loadTemplate() : undefined;
-    return createPostgres({ fs, template, onLog: (line) => console.debug(`postgres ${name}: ${line}`) });
+    const pg = await createPostgres({ fs, template, onLog: (line) => console.debug(`postgres ${name}: ${line}`) });
+    fs.markInitialized();
+    return pg;
   }
 
   private async loadTemplate(): Promise<Blob> {

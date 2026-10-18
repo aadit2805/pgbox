@@ -13,6 +13,7 @@ const DEFAULT_DIR_MODE = 0o700;
 const DEFAULT_FILE_MODE = 0o600;
 const ROOT = "/";
 const PATH_UNDER_PREFIX = "substr(path, 1, length(?)) = ?";
+const INITIALIZED_KEY = "initialized";
 
 const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS fs_node (
@@ -21,12 +22,13 @@ const SCHEMA = [
   "CREATE INDEX IF NOT EXISTS fs_node_parent ON fs_node(parent)",
   `CREATE TABLE IF NOT EXISTS fs_block (
     path TEXT NOT NULL, idx INTEGER NOT NULL, data BLOB NOT NULL, PRIMARY KEY (path, idx))`,
+  "CREATE TABLE IF NOT EXISTS fs_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
 ];
 
 type ErrnoName = keyof typeof ERRNO_CODES;
 type EmscriptenOptions = Parameters<BaseFilesystem["init"]>[1];
 type PostgresModule = Parameters<NonNullable<EmscriptenOptions["preRun"]>[number]>[0];
-type StreamWrite = (stream: { nfd: number }, buffer: Uint8Array, offset: number, length: number, position: number) => number;
+type StreamWrite = (stream: { nfd: number }, buffer: ArrayBufferView, offset: number, length: number, position: number) => number;
 
 class FsError extends Error {
   code: number;
@@ -66,6 +68,7 @@ const baseName = (path: string) => path.slice(path.lastIndexOf("/") + 1);
 
 const asBytes = (value: SqlValue) => (value instanceof Uint8Array ? value : new Uint8Array(value as ArrayBuffer));
 
+const byteView = (view: ArrayBufferView) => new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
 
 function* blockSpans(position: number, length: number): Generator<BlockSpan> {
   for (let pos = position; pos < position + length; ) {
@@ -96,7 +99,17 @@ export class StorageFS extends BaseFilesystem {
   }
 
   isInitialized() {
-    return this.find("/PG_VERSION") !== undefined;
+    return this.sql("SELECT 1 FROM fs_meta WHERE key = ?", INITIALIZED_KEY).length > 0;
+  }
+
+  markInitialized() {
+    this.sql("INSERT OR REPLACE INTO fs_meta (key, value) VALUES (?, ?)", INITIALIZED_KEY, new Date().toISOString());
+  }
+
+  clear() {
+    this.sql("DELETE FROM fs_block");
+    this.sql("DELETE FROM fs_node WHERE path != ?", ROOT);
+    this.sql("DELETE FROM fs_meta");
   }
 
   chmod(path: string, mode: number) {
@@ -144,14 +157,15 @@ export class StorageFS extends BaseFilesystem {
     return this.sql("SELECT path FROM fs_node WHERE parent = ? AND path != ?", node.path, ROOT).map((row) => baseName(String(row.path)));
   }
 
-  read(fd: number, buffer: Uint8Array, offset: number, length: number, position: number) {
+  read(fd: number, buffer: ArrayBufferView, offset: number, length: number, position: number) {
     const node = this.openFile(fd);
+    const target = byteView(buffer);
     const readable = Math.max(0, Math.min(length, node.size - position));
     for (const span of blockSpans(position, readable)) {
-      const block = this.readBlock(node.path, span.idx);
+      const stored = this.readBlock(node.path, span.idx)?.subarray(span.within, span.within + span.length);
       const dest = offset + span.offset;
-      if (block) buffer.set(block.subarray(span.within, span.within + span.length), dest);
-      else buffer.fill(0, dest, dest + span.length);
+      if (stored) target.set(stored, dest);
+      target.fill(0, dest + (stored?.length ?? 0), dest + span.length);
     }
     return readable;
   }
@@ -207,7 +221,7 @@ export class StorageFS extends BaseFilesystem {
     // PGlite's bridge forwards write(buffer) as buffer.buffer, which drops a view's byteOffset and corrupts tar-extracted files.
     ops.write = (stream, buffer, offset, length, position) => {
       try {
-        return this.write(stream.nfd, buffer, offset, length, position);
+        return this.write(stream.nfd, byteView(buffer), offset, length, position);
       } catch (err) {
         if (err instanceof FsError) throw new mod.FS.ErrnoError(err.code);
         throw err;
