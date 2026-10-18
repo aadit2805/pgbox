@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 
-const URL_BASE = process.env.PGBOX_URL ?? "https://pgbox.pgbox.workers.dev";
+const URL_BASE = process.env.PGBOX_URL;
+if (!URL_BASE) throw new Error("set PGBOX_URL to your deployed worker, e.g. https://pgbox.<you>.workers.dev");
 const TOKEN = readFileSync(new URL("../.pgbox-token", import.meta.url), "utf8").trim();
 const RUN = Date.now().toString(36);
 const GROWTH_BATCHES = 40;

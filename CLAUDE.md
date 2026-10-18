@@ -13,9 +13,9 @@ TypeScript, strict, no `any`. Node 24 (`nvm use 24`); Wrangler refuses older ver
 - `npm run typecheck` — must pass before any commit.
 - `npm test` — `test/storage-fs.test.ts`: real PGlite on `node:sqlite` through `StorageFS`
   (fresh boot from the template, 250k rows, reopen, update survives reopen).
-- `npm run deploy` — `wrangler deploy` to https://pgbox.pgbox.workers.dev.
-- `node scripts/loadtest.mjs [growth|fanout|all]` — against the deployed Worker; reads the token
-  from `.pgbox-token`.
+- `npm run deploy` — `wrangler deploy` (builds the template first).
+- `PGBOX_URL=https://… node scripts/loadtest.mjs [growth|fanout|all]` — against the deployed
+  Worker; reads the token from `.pgbox-token`.
 - `npm run patch-wasm` (runs on `npm install`) — rewrites `pglite.wasm`'s memory floor into
   `patched/pglite.wasm`.
 - `npm run template` — builds `public/template.tar.gz`, the empty cluster new databases start
@@ -28,7 +28,8 @@ TypeScript, strict, no `any`. Node 24 (`nvm use 24`); Wrangler refuses older ver
 src/
   index.ts             fetch handler: bearer check, route /<name> to its Durable Object
   database.ts          Database Durable Object: one Postgres, booted once, queries
-  postgres.ts          createPostgres(fs, template?): PGlite with the Workers shims and small caches
+  postgres.ts          createPostgres(fs, template?): PGlite with the Workers shims
+  postgres-settings.ts POSTGRES_SETTINGS (small caches, no failing SQL in logs), shared with the test
   storage-fs.ts        StorageFS: PGlite filesystem on a synchronous SQL exec (DO storage or node:sqlite)
   bearer.ts            timing-safe Authorization: Bearer check
   precompiled/         wasm Emscripten would compile at runtime, shipped compiled, matched by bytes
