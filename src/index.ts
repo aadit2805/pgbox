@@ -7,7 +7,13 @@ const USAGE = "POST /<database-name> with SQL as the body";
 
 function databaseName(url: URL): string | undefined {
   const [, name, ...rest] = url.pathname.split("/");
-  return name && rest.length === 0 ? decodeURIComponent(name) : undefined;
+  if (!name || rest.length) return undefined;
+  try {
+    return decodeURIComponent(name);
+  } catch (err) {
+    if (err instanceof URIError) return undefined;
+    throw err;
+  }
 }
 
 export default {
