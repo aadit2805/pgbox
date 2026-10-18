@@ -1,0 +1,26 @@
+{
+  "name": "pgbox",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "predeploy": "npm run template",
+    "typecheck": "wrangler types && tsc --noEmit",
+    "test": "node test/storage-fs.test.ts",
+    "pretest": "npm run template",
+    "patch-wasm": "python3 patched/patch-memory.py node_modules/@electric-sql/pglite/dist/pglite.wasm patched/pglite.wasm 512",
+    "postinstall": "npm run patch-wasm",
+    "precompile": "node patched/capture-precompiled.mjs",
+    "template": "node patched/make-template.mjs"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "^0.5.10",
+    "wrangler": "^4.151.1"
+  },
+  "devDependencies": {
+    "@types/emscripten": "^1.41.6",
+    "@types/node": "^26.6.5",
+    "typescript": "^7.0.2"
+  }
+}

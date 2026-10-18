@@ -1,0 +1,9 @@
+node_modules
+dist
+.wrangler
+.dev.vars
+.pgbox-token
+worker-configuration.d.ts
+patched/pglite.wasm
+patched/template.tar.gz
+public/template.tar.gz
