@@ -2,27 +2,22 @@ import { PGlite } from "@electric-sql/pglite";
 import pgliteData from "@electric-sql/pglite/dist/pglite.data";
 import pgliteWasm from "../patched/pglite.wasm";
 import { PRECOMPILED } from "./precompiled/index";
+import { MB, POSTGRES_SETTINGS } from "./postgres-settings";
 import type { StorageFS } from "./storage-fs";
 
-const MB = 1024 * 1024;
+type ModuleConstructor = new (bytes: BufferSource) => WebAssembly.Module;
+
 const INITIAL_WASM_MEMORY_BYTES = 32 * MB;
-const POSTGRES_SETTINGS = [
-  "shared_buffers = 16MB",
-  "work_mem = 2MB",
-  "maintenance_work_mem = 8MB",
-  "temp_buffers = 2MB",
-  "wal_buffers = 1MB",
-];
+const wasmNamespace: object = WebAssembly;
+const RuntimeModule: ModuleConstructor = Reflect.get(wasmNamespace, "Module");
+const nodeProcess: unknown = Reflect.get(globalThis, "process");
+
+let activeBoots = 0;
 
 const sameBytes = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((v, i) => v === b[i]);
 
 const asBytes = (source: BufferSource) =>
   source instanceof Uint8Array ? source : ArrayBuffer.isView(source) ? new Uint8Array(source.buffer, source.byteOffset, source.byteLength) : new Uint8Array(source);
-
-type ModuleConstructor = new (bytes: BufferSource) => WebAssembly.Module;
-
-const wasmNamespace: object = WebAssembly;
-const RuntimeModule: ModuleConstructor = Reflect.get(wasmNamespace, "Module");
 
 class PrecompiledModule extends RuntimeModule {
   static [Symbol.hasInstance](value: unknown): boolean {
@@ -41,13 +36,12 @@ class PrecompiledModule extends RuntimeModule {
 Object.defineProperty(WebAssembly, "Module", { value: PrecompiledModule, writable: true, configurable: true });
 
 async function withoutNodeGlobal<T>(run: () => Promise<T>): Promise<T> {
-  const nodeProcess: unknown = Reflect.get(globalThis, "process");
   // Emscripten takes its Node path whenever process.versions.node exists, which it does under Workers.
-  Reflect.set(globalThis, "process", undefined);
+  if (activeBoots++ === 0) Reflect.set(globalThis, "process", undefined);
   try {
     return await run();
   } finally {
-    Reflect.set(globalThis, "process", nodeProcess);
+    if (--activeBoots === 0) Reflect.set(globalThis, "process", nodeProcess);
   }
 }
 
