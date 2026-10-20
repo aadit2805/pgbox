@@ -14,8 +14,17 @@ export interface Env {
   PGBOX_TOKEN?: string;
 }
 
+export const MAX_DATABASE_NAME_CHARS = 128;
+export const DATABASE_NAME_RULE = `1 to ${MAX_DATABASE_NAME_CHARS} characters with no "/"`;
+
+export const isDatabaseName = (name: string) => name.length > 0 && name.length <= MAX_DATABASE_NAME_CHARS && !name.includes("/");
+
+export const openDatabase = (env: Env, name: string) => env.DB.get(env.DB.idFromName(name));
+
+type Cell = string | number | bigint | boolean | null | object;
+
 export interface QueryResult {
-  rows: unknown[];
+  rows: Record<string, Cell>[];
   startedFromTemplate: boolean;
   wasmMemoryMB: number;
 }
