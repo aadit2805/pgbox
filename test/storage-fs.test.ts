@@ -6,6 +6,7 @@ import { DatabaseSync, type SQLInputValue, type SQLOutputValue } from "node:sqli
 import { PGlite } from "@electric-sql/pglite";
 import { MB, POSTGRES_SETTINGS } from "../src/postgres-settings.ts";
 import { StorageFS, type SqlExec, type SqlValue } from "../src/storage-fs.ts";
+import { unpackTemplate } from "../src/unpack-template.ts";
 
 const DB_FILE = join(tmpdir(), "pgbox-storage-fs-test.sqlite");
 const TEMPLATE = "public/template.tar.gz";
@@ -42,9 +43,10 @@ async function timed<T>(label: string, run: () => Promise<T>): Promise<T> {
 async function freshDatabaseLoadsTemplateAndTakesWrites() {
   const { db, fs } = openStorage();
   assert.equal(fs.isInitialized(), false);
-  const pg = await timed("fresh boot from template", () =>
-    PGlite.create({ fs, loadDataDir: new Blob([readFileSync(TEMPLATE)]), postgresqlconf: POSTGRES_SETTINGS }),
-  );
+  const pg = await timed("fresh boot from template", async () => {
+    await unpackTemplate(fs, new Blob([readFileSync(TEMPLATE)]).stream());
+    return PGlite.create({ fs, postgresqlconf: POSTGRES_SETTINGS });
+  });
   fs.markInitialized();
   assert.equal(fs.isInitialized(), true);
   await pg.exec("create table t(id serial primary key, v text)");

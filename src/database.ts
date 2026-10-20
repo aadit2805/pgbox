@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { messages, type PGlite } from "@electric-sql/pglite";
 import { createPostgres, wasmMemoryMegabytes } from "./postgres";
 import { StorageFS, type SqlValue } from "./storage-fs";
+import { unpackTemplate } from "./unpack-template";
 
 const TEMPLATE_URL = "https://assets/template.tar.gz";
 
@@ -51,16 +52,17 @@ export class Database extends DurableObject<Env> {
     const storage = this.ctx.storage.sql;
     const fs = new StorageFS((query, ...bindings) => storage.exec(query, ...bindings.map(toStorageValue)).toArray());
     this.startedFromTemplate = !fs.isInitialized();
-    if (this.startedFromTemplate) fs.clear();
-    const template = this.startedFromTemplate ? await this.loadTemplate() : undefined;
-    const pg = await createPostgres({ fs, template, onLog: (line) => console.debug(`postgres ${name}: ${line}`) });
+    if (this.startedFromTemplate) await this.loadTemplate(fs);
+    const pg = await createPostgres({ fs, onLog: (line) => console.debug(`postgres ${name}: ${line}`) });
     fs.markInitialized();
     return pg;
   }
 
-  private async loadTemplate(): Promise<Blob> {
+  private async loadTemplate(fs: StorageFS) {
+    fs.clear();
     const response = await this.env.ASSETS.fetch(TEMPLATE_URL);
     if (!response.ok) throw new Error(`template asset returned ${response.status}`);
-    return response.blob();
+    if (!response.body) throw new Error("template asset has no body");
+    await unpackTemplate(fs, response.body);
   }
 }

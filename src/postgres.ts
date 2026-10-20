@@ -47,17 +47,15 @@ async function withoutNodeGlobal<T>(run: () => Promise<T>): Promise<T> {
 
 export interface PostgresOptions {
   fs: StorageFS;
-  template?: Blob;
   onLog: (line: string) => void;
 }
 
-export function createPostgres({ fs, template, onLog }: PostgresOptions): Promise<PGlite> {
+export function createPostgres({ fs, onLog }: PostgresOptions): Promise<PGlite> {
   return withoutNodeGlobal(() =>
     PGlite.create({
       fs,
       pgliteWasmModule: pgliteWasm,
       fsBundle: new Blob([pgliteData]),
-      loadDataDir: template,
       initialMemory: INITIAL_WASM_MEMORY_BYTES,
       postgresqlconf: POSTGRES_SETTINGS,
       onStderr: (line) => {

@@ -4,7 +4,7 @@ import { BaseFilesystem, ERRNO_CODES, type FsStats } from "@electric-sql/pglite/
 export type SqlValue = string | number | null | ArrayBuffer | Uint8Array;
 export type SqlExec = (query: string, ...bindings: SqlValue[]) => Record<string, SqlValue>[];
 
-const POSTGRES_PAGE_BYTES = 8192;
+export const POSTGRES_PAGE_BYTES = 8192;
 const STAT_BLOCK_BYTES = 512;
 const S_IFDIR = 0o040000;
 const S_IFREG = 0o100000;
@@ -218,7 +218,7 @@ export class StorageFS extends BaseFilesystem {
 
   private routeWritesWithViews(mod: PostgresModule) {
     const ops: { write: StreamWrite } = Reflect.get(mod.FS.lookupPath(PGlite.paths.PGDATA, {}).node, "stream_ops");
-    // PGlite's bridge forwards write(buffer) as buffer.buffer, which drops a view's byteOffset and corrupts tar-extracted files.
+    // PGlite's bridge forwards write(buffer) as buffer.buffer, which drops a view's byteOffset and corrupts files PGlite writes itself.
     ops.write = (stream, buffer, offset, length, position) => {
       try {
         return this.write(stream.nfd, byteView(buffer), offset, length, position);
