@@ -12,6 +12,17 @@ curl -X POST https://<your-worker>.workers.dev/my-agent \
 
 A new name gets a new, empty database. `DELETE /my-agent` wipes it.
 
+## Use it from an agent
+
+`/mcp` is an MCP server with three tools: `run_sql`, `list_tables` and `delete_database`. To add it to Claude Code:
+
+```sh
+claude mcp add --transport http pgbox https://<your-worker>.workers.dev/mcp \
+  --header "Authorization: Bearer $PGBOX_TOKEN"
+```
+
+The agent picks a database name and gets the same data back in every later session. If Claude Code says the server needs authentication, the bearer header is missing or wrong.
+
 ## Run it
 
 Needs Node 24 and a Cloudflare account on Workers Paid (the bundle is about 6.5 MB).

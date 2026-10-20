@@ -2,7 +2,9 @@
 
 One Cloudflare Worker, one Durable Object class. `POST /<name>` with SQL in the body runs it
 against that name's own Postgres; a new name gets a new, empty database. `DELETE /<name>`
-wipes that database's storage. Each Durable Object
+wipes that database's storage. `POST /mcp` is a stateless MCP server (JSON responses, no
+SSE) exposing `run_sql`, `list_tables` and `delete_database`; the name `mcp` is reserved for it.
+Database names are 1 to 128 characters with no `/`, on both routes. Each Durable Object
 runs PGlite (Postgres compiled to wasm) and keeps its data directory in the object's SQLite
 storage, one row per 8 KB page, so memory holds only what Postgres is using.
 
@@ -33,6 +35,8 @@ src/
   unpack-template.ts   streams the gzipped template tar into StorageFS one page at a time
   postgres-settings.ts POSTGRES_SETTINGS (small caches, no failing SQL in logs), shared with the test
   storage-fs.ts        StorageFS: PGlite filesystem on a synchronous SQL exec (DO storage or node:sqlite)
+  mcp.ts               MCP over HTTP: JSON-RPC initialize, tools/list, tools/call
+  serialize.ts         JSON for Postgres values (int8 as string, bytea as hex) and error messages
   bearer.ts            timing-safe Authorization: Bearer check
   precompiled/         wasm Emscripten would compile at runtime, shipped compiled, matched by bytes
 patched/
