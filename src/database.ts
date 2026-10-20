@@ -35,6 +35,26 @@ export class Database extends DurableObject<Env> {
     }
   }
 
+  async destroy(name: string): Promise<{ deleted: string }> {
+    await this.ctx.blockConcurrencyWhile(async () => {
+      await this.closePostgres(name);
+      await this.ctx.storage.deleteAll();
+    });
+    console.debug(`database ${name} deleted`);
+    return { deleted: name };
+  }
+
+  private async closePostgres(name: string) {
+    const booted = this.postgres;
+    this.postgres = undefined;
+    if (!booted) return;
+    try {
+      await (await booted).close();
+    } catch (err) {
+      console.warn(`postgres for ${name} did not close cleanly before delete:`, err);
+    }
+  }
+
   private boot(name: string): Promise<PGlite> {
     this.postgres ??= this.start(name).catch((err: unknown) => {
       this.discardPostgres(name, err);
