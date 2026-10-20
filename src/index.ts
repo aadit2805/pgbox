@@ -1,7 +1,7 @@
 import { hasBearerSecret } from "./bearer";
 import type { Env } from "./database";
 
-export { Database } from "./database";
+export { PostgresDatabase } from "./database";
 
 const USAGE = "POST /<database-name> with SQL as the body, or DELETE /<database-name>";
 

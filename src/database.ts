@@ -9,7 +9,7 @@ const TEMPLATE_URL = "https://assets/template.tar.gz";
 const toStorageValue = (value: SqlValue): SqlStorageValue => (value instanceof Uint8Array ? value.slice().buffer : value);
 
 export interface Env {
-  DB: DurableObjectNamespace<Database>;
+  DB: DurableObjectNamespace<PostgresDatabase>;
   ASSETS: Fetcher;
   PGBOX_TOKEN?: string;
 }
@@ -20,7 +20,7 @@ export interface QueryResult {
   wasmMemoryMB: number;
 }
 
-export class Database extends DurableObject<Env> {
+export class PostgresDatabase extends DurableObject<Env> {
   private postgres?: Promise<PGlite>;
   private startedFromTemplate = false;
 
