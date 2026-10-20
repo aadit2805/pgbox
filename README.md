@@ -10,7 +10,7 @@ curl -X POST https://<your-worker>.workers.dev/my-agent \
   -d "create table notes (body text); select now()"
 ```
 
-A new name gets a new, empty database.
+A new name gets a new, empty database. `DELETE /my-agent` wipes it.
 
 ## Run it
 
@@ -28,7 +28,8 @@ npm run deploy
 
 - Each Durable Object gets about 128 MB of memory, shared with others in the same isolate. Postgres uses about 46 MB.
 - One database has been tested past 200 MB.
-- Starting hundreds of new databases at the same moment still fails a few of them.
+- 100 new databases started at the same moment all came up. More than that hasn't been tested.
+- Every database starts at about 29 MB of storage, so 5 GB holds about 170 of them.
 
 ## License
 

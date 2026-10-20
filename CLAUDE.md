@@ -1,7 +1,8 @@
 # pgbox — a real Postgres per name, on Cloudflare
 
 One Cloudflare Worker, one Durable Object class. `POST /<name>` with SQL in the body runs it
-against that name's own Postgres; a new name gets a new, empty database. Each Durable Object
+against that name's own Postgres; a new name gets a new, empty database. `DELETE /<name>`
+wipes that database's storage. Each Durable Object
 runs PGlite (Postgres compiled to wasm) and keeps its data directory in the object's SQLite
 storage, one row per 8 KB page, so memory holds only what Postgres is using.
 
@@ -15,7 +16,7 @@ TypeScript, strict, no `any`. Node 24 (`nvm use 24`); Wrangler refuses older ver
   (fresh boot from the template, 250k rows, reopen, update survives reopen).
 - `npm run deploy` — `wrangler deploy` (builds the template first).
 - `PGBOX_URL=https://… node scripts/loadtest.mjs [growth|fanout|all]` — against the deployed
-  Worker; reads the token from `.pgbox-token`.
+  Worker; reads the token from `.pgbox-token` and deletes every database it creates.
 - `npm run patch-wasm` (runs on `npm install`) — rewrites `pglite.wasm`'s memory floor into
   `patched/pglite.wasm`.
 - `npm run template` — builds `public/template.tar.gz`, the empty cluster new databases start
@@ -27,8 +28,9 @@ TypeScript, strict, no `any`. Node 24 (`nvm use 24`); Wrangler refuses older ver
 ```
 src/
   index.ts             fetch handler: bearer check, route /<name> to its Durable Object
-  database.ts          Database Durable Object: one Postgres, booted once, queries
-  postgres.ts          createPostgres(fs, template?): PGlite with the Workers shims
+  database.ts          PostgresDatabase Durable Object: one Postgres, booted once, queries
+  postgres.ts          createPostgres({ fs, onLog }): PGlite with the Workers shims
+  unpack-template.ts   streams the gzipped template tar into StorageFS one page at a time
   postgres-settings.ts POSTGRES_SETTINGS (small caches, no failing SQL in logs), shared with the test
   storage-fs.ts        StorageFS: PGlite filesystem on a synchronous SQL exec (DO storage or node:sqlite)
   bearer.ts            timing-safe Authorization: Bearer check
@@ -55,6 +57,9 @@ Each is a hard limit of the Workers runtime, found by running it, not guessed:
 - **initdb boots a second Postgres.** PGlite's initdb path creates a throwaway PGlite and a
   separate initdb instance. New databases instead load `public/template.tar.gz`, built with
   `--wal-segsize=1` so the cluster is 29 MB instead of 40.
+- **PGlite's `loadDataDir` holds the whole tar in memory** (compressed, unpacked, and split
+  into files: about 60 MB), which ran isolates out of memory when many databases started at
+  once. `unpack-template.ts` streams it into storage one 8 KB page at a time instead.
 - **`process.versions.node` exists** under Workers, so Emscripten takes its Node path and calls
   `process.binding`. `process` is hidden for the duration of `PGlite.create`.
 - **`import.meta.url` is undefined**, so `wrangler.jsonc` defines it.
