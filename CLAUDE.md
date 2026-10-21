@@ -8,7 +8,7 @@ Database names are 1 to 128 characters with no `/`, on both routes. Each Durable
 runs PGlite (Postgres compiled to wasm) and keeps its data directory in the object's SQLite
 storage, one row per 8 KB page, so memory holds only what Postgres is using.
 
-TypeScript, strict, no `any`. Node 24 (`nvm use 24`); Wrangler refuses older versions.
+TypeScript, strict, no `any`. Node 24 (`.nvmrc`; `nvm use`); Wrangler refuses older versions.
 
 ## Commands
 
@@ -78,6 +78,8 @@ Each is a hard limit of the Workers runtime, found by running it, not guessed:
   directory dumps or in-memory copies of PGDATA; that is the 20 MB ceiling we removed.
 - Memory numbers come from production (`wrangler tail` shows `Exceeded Memory Limit`), not from
   `wrangler dev`, which doesn't enforce the limit.
+- A new secret goes in `.dev.vars.example` and gets a `cloudflare.bindings.<NAME>.description`
+  in `package.json`, or the Deploy to Cloudflare button won't ask for it.
 - Commit as `Aadit Shah <aadit2805@gmail.com>`.
 
 ## Coding rules

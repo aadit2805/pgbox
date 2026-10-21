@@ -25,7 +25,13 @@ The agent picks a database name and gets the same data back in every later sessi
 
 ## Run it
 
-Needs Node 24 and a Cloudflare account on Workers Paid (the bundle is about 6.5 MB).
+Needs a Cloudflare account on Workers Paid, because the bundle is about 6.5 MB.
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/aadit2805/pgbox)
+
+The button copies this repo to your Git account, builds it on Cloudflare and asks for `PGBOX_TOKEN`. Pick a long random one (`openssl rand -hex 32`) and save it, since it can't be read back.
+
+Or deploy from your machine with Node 24:
 
 ```sh
 npm install

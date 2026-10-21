@@ -22,5 +22,12 @@
     "@types/emscripten": "^1.41.6",
     "@types/node": "^26.6.5",
     "typescript": "^7.0.2"
+  },
+  "cloudflare": {
+    "bindings": {
+      "PGBOX_TOKEN": {
+        "description": "Every request must send this as `Authorization: Bearer <token>`. Generate a long random one with `openssl rand -hex 32` and keep a copy: Cloudflare will not show it again."
+      }
+    }
   }
 }
