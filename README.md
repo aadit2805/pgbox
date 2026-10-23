@@ -46,7 +46,7 @@ npm run deploy
 - Each Durable Object gets about 128 MB of memory, shared with others in the same isolate. Postgres uses about 46 MB.
 - One database has been tested past 200 MB.
 - 100 new databases started at the same moment: all came up in one run, 99 in another. More than that hasn't been tested.
-- Every database starts at about 10.6 MB of storage, so 5 GB holds about 470 of them. Storage grows at about 2.4 times the data size.
+- Every database starts at about 10.6 MB of storage, so 5 GB holds about 470 of them. Past that, storage runs about 20 MB above the data size (203 MB of data took 226 MB).
 - There are no template databases, so `create database` fails. Use schemas, or another name.
 
 ## License
