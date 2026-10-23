@@ -1,21 +1,25 @@
 import { authorizeDatabase, forbidden, requestAccess, unauthorized, type Access } from "./access";
-import { DATABASE_NAME_RULE, isDatabaseName, openDatabase, type Env } from "./database";
+import { openDatabase, type Env } from "./database";
+import { DATABASE_NAME_RULE, isDatabaseName, MCP_NAME } from "./database-name";
+import { BAD_REQUEST, INTERNAL_SERVER_ERROR } from "./http-status";
 import { handleMcp } from "./mcp";
 import { mintScopedToken, nowSeconds, type TokenClaims } from "./scoped-token";
 import { errorMessage, jsonResponse } from "./serialize";
 
 export { PostgresDatabase } from "./database";
 
-const MCP_PATH = "/mcp";
+const MCP_PATH = `/${MCP_NAME}`;
 const TOKEN_SEGMENT = "token";
 const TTL_PARAM = "ttl";
+const TTL_NEVER = "never";
 const TTL_PATTERN = /^[1-9]\d*$/;
 const SECONDS_PER_DAY = 86_400;
+const DEFAULT_TOKEN_TTL_DAYS = 30;
 const MAX_TOKEN_TTL_DAYS = 365;
+const DEFAULT_TOKEN_TTL_SECONDS = DEFAULT_TOKEN_TTL_DAYS * SECONDS_PER_DAY;
 const MAX_TOKEN_TTL_SECONDS = MAX_TOKEN_TTL_DAYS * SECONDS_PER_DAY;
-const BAD_REQUEST = 400;
-const USAGE = `POST /<database-name> with SQL as the body, DELETE /<database-name>, POST /<database-name>/${TOKEN_SEGMENT}[?${TTL_PARAM}=<seconds>] for a token scoped to it, or MCP at ${MCP_PATH}. Names are ${DATABASE_NAME_RULE}.`;
-const INVALID_TTL = `${TTL_PARAM} must be whole seconds from 1 to ${MAX_TOKEN_TTL_SECONDS}`;
+const USAGE = `POST /<database-name> with SQL as the body, DELETE /<database-name>, POST /<database-name>/${TOKEN_SEGMENT}[?${TTL_PARAM}=<seconds>|${TTL_NEVER}] for a token scoped to it, or MCP at ${MCP_PATH}. Names are ${DATABASE_NAME_RULE}.`;
+const INVALID_TTL = `${TTL_PARAM} must be whole seconds from 1 to ${MAX_TOKEN_TTL_SECONDS}, or ${TTL_NEVER}`;
 const SCOPED_CANNOT_MINT = "scoped tokens cannot mint tokens";
 
 interface Route {
@@ -47,19 +51,27 @@ async function withAccess(request: Request, env: Env, handle: (access: Access) =
   return access ? handle(access) : unauthorized();
 }
 
-function expiryClaim(ttl: string | null): Pick<TokenClaims, "exp"> | undefined {
-  if (ttl === null) return {};
-  if (!TTL_PATTERN.test(ttl) || Number(ttl) > MAX_TOKEN_TTL_SECONDS) return undefined;
-  return { exp: nowSeconds() + Number(ttl) };
+function ttlSeconds(ttl: string | null): number | undefined {
+  if (ttl === null) return DEFAULT_TOKEN_TTL_SECONDS;
+  return TTL_PATTERN.test(ttl) && Number(ttl) <= MAX_TOKEN_TTL_SECONDS ? Number(ttl) : undefined;
 }
 
-async function mintToken(request: Request, env: Env, name: string): Promise<Response> {
+function expiryClaim(ttl: string | null): Pick<TokenClaims, "exp"> | undefined {
+  if (ttl === TTL_NEVER) return {};
+  const seconds = ttlSeconds(ttl);
+  return seconds === undefined ? undefined : { exp: nowSeconds() + seconds };
+}
+
+async function mintToken(request: Request, secret: string, name: string): Promise<Response> {
   if (request.method !== "POST") return usage();
-  if (!env.PGBOX_TOKEN) return unauthorized();
   const expiry = expiryClaim(new URL(request.url).searchParams.get(TTL_PARAM));
   if (!expiry) return new Response(INVALID_TTL, { status: BAD_REQUEST });
-  const token = await mintScopedToken(env.PGBOX_TOKEN, { db: name, ...expiry });
+  const token = await mintScopedToken(secret, { db: name, ...expiry });
   return jsonResponse({ token, database: name, expiresAt: expiry.exp ?? null });
+}
+
+function mintRoute(request: Request, access: Access, name: string): Response | Promise<Response> {
+  return access.kind === "admin" ? mintToken(request, access.secret, name) : forbidden(SCOPED_CANNOT_MINT);
 }
 
 async function respond(name: string, error: string, run: () => Promise<object>): Promise<Response> {
@@ -68,7 +80,7 @@ async function respond(name: string, error: string, run: () => Promise<object>):
   } catch (err) {
     const message = errorMessage(err);
     console.error(`${error} for ${name}: ${message}`);
-    return jsonResponse({ error, message }, { status: 500 });
+    return jsonResponse({ error, message }, { status: INTERNAL_SERVER_ERROR });
   }
 }
 
@@ -88,6 +100,6 @@ export default {
     const route = parseRoute(url);
     if (!route) return withAccess(request, env, usage);
     if (!route.mintsToken) return runDatabase(request, env, route.name);
-    return withAccess(request, env, (access) => (access.kind === "admin" ? mintToken(request, env, route.name) : forbidden(SCOPED_CANNOT_MINT)));
+    return withAccess(request, env, (access) => mintRoute(request, access, route.name));
   },
 };

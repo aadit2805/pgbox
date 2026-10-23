@@ -1,5 +1,7 @@
 import { accessDenial, type Access } from "./access";
-import { DATABASE_NAME_RULE, isDatabaseName, openDatabase, type Env } from "./database";
+import { openDatabase, type Env } from "./database";
+import { DATABASE_NAME_RULE, isDatabaseName } from "./database-name";
+import { ACCEPTED, BAD_REQUEST, METHOD_NOT_ALLOWED, OK } from "./http-status";
 import { errorMessage, jsonResponse, toJson } from "./serialize";
 
 const SERVER_INFO = { name: "pgbox", version: "0.1.0" };
@@ -10,9 +12,6 @@ const INVALID_REQUEST = -32600;
 const METHOD_NOT_FOUND = -32601;
 const INVALID_PARAMS = -32602;
 const INTERNAL_ERROR = -32603;
-const ACCEPTED = 202;
-const BAD_REQUEST = 400;
-const METHOD_NOT_ALLOWED = 405;
 const MAX_RESULT_CHARS = 100_000;
 
 const LIST_TABLES_SQL = `select table_schema as schema, table_name as table,
@@ -59,7 +58,7 @@ interface RpcRequest {
 class RpcError extends Error {
   code: number;
   status: number;
-  constructor(code: number, message: string, status = 200) {
+  constructor(code: number, message: string, status = OK) {
     super(message);
     this.code = code;
     this.status = status;

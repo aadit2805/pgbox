@@ -1,13 +1,9 @@
 import { bearerToken, hasBearerSecret } from "./bearer";
 import type { Env } from "./database";
+import { FORBIDDEN, UNAUTHORIZED } from "./http-status";
 import { verifyScopedToken } from "./scoped-token";
 
-const UNAUTHORIZED = 401;
-const FORBIDDEN = 403;
-
-export type Access = { kind: "admin" } | { kind: "scoped"; database: string };
-
-const ADMIN: Access = { kind: "admin" };
+export type Access = { kind: "admin"; secret: string } | { kind: "scoped"; database: string };
 
 export const unauthorized = () => new Response("unauthorized", { status: UNAUTHORIZED });
 
@@ -16,7 +12,7 @@ export const forbidden = (message: string) => new Response(message, { status: FO
 export async function requestAccess(request: Request, env: Env): Promise<Access | undefined> {
   const secret = env.PGBOX_TOKEN;
   if (!secret) return undefined;
-  if (hasBearerSecret(request, secret)) return ADMIN;
+  if (hasBearerSecret(request, secret)) return { kind: "admin", secret };
   const token = bearerToken(request);
   const claims = token === undefined ? undefined : await verifyScopedToken(secret, token);
   return claims && { kind: "scoped", database: claims.db };
