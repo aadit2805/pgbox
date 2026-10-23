@@ -7,7 +7,7 @@
     "deploy": "wrangler deploy",
     "predeploy": "npm run template",
     "typecheck": "wrangler types && tsc --noEmit",
-    "test": "node test/storage-fs.test.ts",
+    "test": "node test/scoped-token.test.ts && node test/storage-fs.test.ts",
     "pretest": "npm run template",
     "patch-wasm": "python3 patched/patch-memory.py node_modules/@electric-sql/pglite/dist/pglite.wasm patched/pglite.wasm 512",
     "postinstall": "npm run patch-wasm",
