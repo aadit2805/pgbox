@@ -6,5 +6,7 @@ export const POSTGRES_SETTINGS = [
   "maintenance_work_mem = 8MB",
   "temp_buffers = 2MB",
   "wal_buffers = 1MB",
+  "min_wal_size = 2MB",
+  "max_wal_size = 8MB",
   "log_min_error_statement = panic",
 ];
