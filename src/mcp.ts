@@ -1,5 +1,5 @@
 import { accessDenial, type Access } from "./access";
-import { openDatabase, type Env } from "./database";
+import { isSessionBusy, openDatabase, type Env } from "./database";
 import { DATABASE_NAME_RULE, isDatabaseName } from "./database-name";
 import { ACCEPTED, BAD_REQUEST, METHOD_NOT_ALLOWED, OK } from "./http-status";
 import { errorMessage, jsonResponse, toJson } from "./serialize";
@@ -90,9 +90,15 @@ function databaseParam(params: Params): string {
   return name;
 }
 
+async function queryRows(db: Database, database: string, sql: string) {
+  const outcome = await db.query(database, sql);
+  if (isSessionBusy(outcome)) throw new Error(outcome.busy);
+  return outcome.rows;
+}
+
 const TOOL_HANDLERS: Record<string, ToolHandler> = {
-  run_sql: async (db, database, args) => (await db.query(database, stringParam(args, "sql"))).rows,
-  list_tables: async (db, database) => (await db.query(database, LIST_TABLES_SQL)).rows,
+  run_sql: (db, database, args) => queryRows(db, database, stringParam(args, "sql")),
+  list_tables: (db, database) => queryRows(db, database, LIST_TABLES_SQL),
   delete_database: (db, database) => db.destroy(database),
 };
 

@@ -8,21 +8,25 @@ import { StorageFS, type SqlValue } from "./storage-fs";
 import { unpackTemplate } from "./unpack-template";
 import {
   ADMIN_SHUTDOWN,
-  backendInput,
-  clientOutput,
   closeWithError,
+  endSession,
+  exchange,
+  IDLE_SESSION_TIMEOUT,
   INTERNAL_ERROR,
+  isOpen,
   leavesSessionIdle,
+  MAX_QUEUED_BYTES,
+  MAX_QUEUED_MB,
   MessageReader,
   NO_ENCRYPTION,
   PROTOCOL_VIOLATION,
   readMessages,
+  ROLLBACK_SQL,
   sendFrames,
-  simpleQuery,
-  syncMessage,
   TOO_MANY_CONNECTIONS,
   WireProtocolError,
   type PostgresMessage,
+  type WireError,
   type WireMessage,
 } from "./wire";
 
@@ -30,8 +34,12 @@ const TEMPLATE_URL = "https://assets/template.tar.gz";
 const STORAGE_MB_DIGITS = 1;
 const NORMAL_CLOSURE = 1000;
 const BINARY_TYPE = "arraybuffer";
-const ROLLBACK_SQL = "rollback";
-const DISCARD_SESSION_SQL = "discard all";
+const MS_PER_MINUTE = 60_000;
+const WIRE_IDLE_TIMEOUT_MINUTES = 10;
+const WIRE_IDLE_TIMEOUT_MS = WIRE_IDLE_TIMEOUT_MINUTES * MS_PER_MINUTE;
+const POSTGRES_RESTARTED = "Postgres restarted after an internal error; reconnect";
+
+export const DATABASE_NAME_HEADER = "x-pgbox-database";
 
 const toStorageValue = (value: SqlValue): SqlStorageValue => (value instanceof Uint8Array ? value.slice().buffer : value);
 
@@ -40,8 +48,6 @@ export interface Env {
   ASSETS: Fetcher;
   PGBOX_TOKEN?: string;
 }
-
-export const DATABASE_NAME_HEADER = "x-pgbox-database";
 
 export const openDatabase = (env: Env, name: string) => env.DB.get(env.DB.idFromName(name));
 
@@ -54,39 +60,51 @@ export interface QueryResult {
   storageMB: number;
 }
 
-interface WireFrame {
+export interface SessionBusy {
+  busy: string;
+}
+
+export const isSessionBusy = (outcome: object): outcome is SessionBusy => "busy" in outcome;
+
+interface WireConnection {
   name: string;
   socket: WebSocket;
   reader: MessageReader;
-  frame: ArrayBuffer | string;
+  queuedBytes: number;
+  idleTimer?: ReturnType<typeof setTimeout>;
 }
+
+type Frame = ArrayBuffer | string;
+
+async function rollbackIfOpen(pg: PGlite): Promise<boolean> {
+  if (!pg.isInTransaction()) return false;
+  await pg.exec(ROLLBACK_SQL);
+  return true;
+}
+
+const frameBytes = (frame: Frame) => (typeof frame === "string" ? frame.length : frame.byteLength);
 
 export class PostgresDatabase extends DurableObject<Env> {
   private postgres?: Promise<PGlite>;
   private startedFromTemplate = false;
   private session = new Mutex();
-  private wire?: WebSocket;
-  private wireBusy = false;
+  private wire?: WireConnection;
 
-  query(name: string, sql: string): Promise<QueryResult> {
+  query(name: string, sql: string): Promise<QueryResult | SessionBusy> {
     return this.session.runExclusive(async () => {
-      if (this.wireBusy) throw new Error(`${name} is in a transaction on a wire connection; retry once it commits or disconnects`);
+      if (this.wire) return { busy: `${name} has an open wire connection, so HTTP and MCP queries are refused until it disconnects` };
       const pg = await this.boot(name);
-      try {
-        const results = await pg.exec(sql);
-        await this.checkpoint(name, pg);
-        return { rows: results.at(-1)?.rows ?? [], startedFromTemplate: this.startedFromTemplate, wasmMemoryMB: wasmMemoryMegabytes(pg), storageMB: this.storageMegabytes() };
-      } catch (err) {
-        if (!(err instanceof messages.DatabaseError)) this.discardPostgres(name, err);
-        throw err;
-      }
+      const { results, leftTransactionOpen } = await this.execHttp(name, pg, sql);
+      if (leftTransactionOpen) throw new Error("an HTTP request can't leave a transaction open, so it was rolled back; send begin and commit in the same request");
+      await this.checkpoint(name, pg);
+      return { rows: results.at(-1)?.rows ?? [], startedFromTemplate: this.startedFromTemplate, wasmMemoryMB: wasmMemoryMegabytes(pg), storageMB: this.storageMegabytes() };
     });
   }
 
   async destroy(name: string): Promise<{ deleted: string }> {
     await this.ctx.blockConcurrencyWhile(() =>
       this.session.runExclusive(async () => {
-        this.dropWire(name);
+        this.dropWire({ code: ADMIN_SHUTDOWN, message: `${name} was deleted` });
         await this.closePostgres(name);
         await this.ctx.storage.deleteAll();
       }),
@@ -100,116 +118,153 @@ export class PostgresDatabase extends DurableObject<Env> {
     const { 0: client, 1: server } = new WebSocketPair();
     server.binaryType = BINARY_TYPE;
     server.accept();
-    if (this.wire) this.refuseWire(name, server);
-    else this.acceptWire(name, server);
+    const connection: WireConnection = { name, socket: server, reader: new MessageReader(), queuedBytes: 0 };
+    if (this.wire) this.refuseWire(connection);
+    else this.acceptWire(connection);
     return new Response(null, { status: SWITCHING_PROTOCOLS, webSocket: client });
   }
 
-  private acceptWire(name: string, socket: WebSocket) {
-    this.wire = socket;
-    this.wireBusy = false;
-    const reader = new MessageReader();
-    const release = () => this.session.runExclusive(() => this.releaseWire(name, socket));
-    socket.addEventListener("message", (event) => this.session.runExclusive(() => this.onWireFrame({ name, socket, reader, frame: event.data })));
-    socket.addEventListener("close", release);
-    socket.addEventListener("error", release);
-    console.debug(`wire connection to ${name} opened`);
+  private async execHttp(name: string, pg: PGlite, sql: string) {
+    try {
+      const results = await pg.exec(sql);
+      return { results, leftTransactionOpen: await rollbackIfOpen(pg) };
+    } catch (err) {
+      if (!(err instanceof messages.DatabaseError)) this.discardPostgres(name, err);
+      else await rollbackIfOpen(pg);
+      throw err;
+    }
   }
 
-  private refuseWire(name: string, socket: WebSocket) {
-    const reader = new MessageReader();
-    socket.addEventListener("message", (event) => {
-      try {
-        this.answerRefused(name, socket, readMessages(reader, event.data));
-      } catch (err) {
-        this.failWire({ name, socket, err });
-      }
+  private acceptWire(connection: WireConnection) {
+    this.wire = connection;
+    const release = () => this.session.runExclusive(() => this.releaseWire(connection));
+    connection.socket.addEventListener("message", (event) => this.queueWireFrame(connection, event.data));
+    connection.socket.addEventListener("close", release);
+    connection.socket.addEventListener("error", release);
+    this.armIdleTimer(connection);
+    console.debug(`wire connection to ${connection.name} opened`);
+  }
+
+  private queueWireFrame(connection: WireConnection, frame: Frame) {
+    if (!isOpen(connection.socket)) return;
+    this.armIdleTimer(connection);
+    const bytes = frameBytes(frame);
+    connection.queuedBytes += bytes;
+    if (connection.queuedBytes > MAX_QUEUED_BYTES) {
+      return this.abortWire(connection, { code: PROTOCOL_VIOLATION, message: `more than ${MAX_QUEUED_MB} MB of messages were waiting to run` });
+    }
+    return this.session.runExclusive(async () => {
+      connection.queuedBytes -= bytes;
+      await this.onWireFrame(connection, frame);
     });
   }
 
-  private answerRefused(name: string, socket: WebSocket, received: WireMessage[]) {
+  private refuseWire(connection: WireConnection) {
+    const { name, socket, reader } = connection;
+    socket.addEventListener("message", (event) => {
+      try {
+        this.answerRefused(connection, readMessages(reader, event.data));
+      } catch (err) {
+        this.failWire(connection, err);
+      }
+    });
+    socket.addEventListener("close", () => clearTimeout(connection.idleTimer));
+    this.armIdleTimer(connection);
+    console.warn(`second wire connection to ${name} refused`);
+  }
+
+  private answerRefused({ name, socket, idleTimer }: WireConnection, received: WireMessage[]) {
     for (const message of received) {
       if (message.kind === "encryption") {
         sendFrames(socket, NO_ENCRYPTION);
         continue;
       }
-      console.warn(`second wire connection to ${name} refused`);
-      closeWithError(socket, { code: TOO_MANY_CONNECTIONS, message: `${name} already has an open connection; pgbox allows one at a time per database` });
+      clearTimeout(idleTimer);
+      closeWithError(socket, { code: TOO_MANY_CONNECTIONS, message: `${name} already has an open wire connection; pgbox allows one per database at a time` });
       return;
     }
   }
 
-  private async onWireFrame({ name, socket, reader, frame }: WireFrame) {
-    if (this.wire !== socket) return;
+  private armIdleTimer(connection: WireConnection) {
+    clearTimeout(connection.idleTimer);
+    connection.idleTimer = setTimeout(
+      () => this.abortWire(connection, { code: IDLE_SESSION_TIMEOUT, message: `closed after ${WIRE_IDLE_TIMEOUT_MINUTES} minutes without traffic` }),
+      WIRE_IDLE_TIMEOUT_MS,
+    );
+  }
+
+  private abortWire(connection: WireConnection, error: WireError) {
+    console.warn(`wire connection to ${connection.name} closed: ${error.message}`);
+    closeWithError(connection.socket, error);
+    return this.session.runExclusive(() => this.releaseWire(connection));
+  }
+
+  private async onWireFrame(connection: WireConnection, frame: Frame) {
     try {
-      for (const message of readMessages(reader, frame)) {
-        if (this.wire !== socket) return;
-        await this.handleWireMessage(name, socket, message);
+      for (const message of readMessages(connection.reader, frame)) {
+        if (this.wire !== connection || !isOpen(connection.socket)) return;
+        await this.handleWireMessage(connection, message);
       }
     } catch (err) {
-      this.failWire({ name, socket, err });
-      await this.releaseWire(name, socket);
+      this.failWire(connection, err);
+      await this.releaseWire(connection);
     }
   }
 
-  private async handleWireMessage(name: string, socket: WebSocket, message: WireMessage) {
-    if (message.kind === "encryption") return sendFrames(socket, NO_ENCRYPTION);
+  private async handleWireMessage(connection: WireConnection, message: WireMessage) {
+    if (message.kind === "encryption") return sendFrames(connection.socket, NO_ENCRYPTION);
     if (message.kind === "cancel") throw new WireProtocolError("cancel requests are not supported");
     if (message.kind === "terminate") {
-      await this.releaseWire(name, socket);
-      return socket.close(NORMAL_CLOSURE);
+      await this.releaseWire(connection);
+      return connection.socket.close(NORMAL_CLOSURE);
     }
-    await this.feedWire(name, socket, message);
+    await this.feedWire(connection, message);
   }
 
-  private async feedWire(name: string, socket: WebSocket, message: PostgresMessage) {
+  private async feedWire({ name, socket }: WireConnection, message: PostgresMessage) {
     const pg = await this.boot(name);
-    const output = await this.execProtocol(name, pg, message);
+    const output = await this.exchangeWire(name, pg, message);
     sendFrames(socket, output);
-    this.wireBusy = !leavesSessionIdle(message, output);
-    if (!this.wireBusy) await this.checkpoint(name, pg);
+    if (leavesSessionIdle(message, output)) await this.checkpoint(name, pg);
   }
 
-  private async execProtocol(name: string, pg: PGlite, message: PostgresMessage): Promise<Uint8Array> {
+  private async exchangeWire(name: string, pg: PGlite, message: PostgresMessage): Promise<Uint8Array> {
     try {
-      return clientOutput(await pg.execProtocolRaw(backendInput(message)));
+      return await exchange(pg, message);
     } catch (err) {
       this.discardPostgres(name, err);
       throw err;
     }
   }
 
-  private failWire({ name, socket, err }: { name: string; socket: WebSocket; err: unknown }) {
+  private failWire({ name, socket }: WireConnection, err: unknown) {
     const message = errorMessage(err);
     console.error(`wire connection to ${name} failed: ${message}`);
     closeWithError(socket, { code: err instanceof WireProtocolError ? PROTOCOL_VIOLATION : INTERNAL_ERROR, message });
   }
 
-  private async releaseWire(name: string, socket: WebSocket) {
-    if (this.wire !== socket) return;
+  private async releaseWire(connection: WireConnection) {
+    clearTimeout(connection.idleTimer);
+    if (this.wire !== connection) return;
     this.wire = undefined;
-    this.wireBusy = false;
-    console.debug(`wire connection to ${name} closed`);
-    if (this.postgres) await this.resetSession(name, this.postgres);
+    console.debug(`wire connection to ${connection.name} closed`);
+    if (this.postgres) await this.resetSession(connection.name, this.postgres);
   }
 
   private async resetSession(name: string, booted: Promise<PGlite>) {
     try {
-      const pg = await booted;
-      await pg.execProtocolRaw(simpleQuery(ROLLBACK_SQL));
-      await pg.execProtocolRaw(syncMessage());
-      if (pg.isInTransaction()) await pg.exec(ROLLBACK_SQL);
-      await pg.exec(DISCARD_SESSION_SQL);
+      await endSession(await booted);
     } catch (err) {
       this.discardPostgres(name, err);
     }
   }
 
-  private dropWire(name: string) {
-    if (!this.wire) return;
-    closeWithError(this.wire, { code: ADMIN_SHUTDOWN, message: `${name} was deleted` });
+  private dropWire(error: WireError) {
+    const connection = this.wire;
+    if (!connection) return;
     this.wire = undefined;
-    this.wireBusy = false;
+    clearTimeout(connection.idleTimer);
+    closeWithError(connection.socket, error);
   }
 
   private storageMegabytes(): number {
@@ -246,6 +301,7 @@ export class PostgresDatabase extends DurableObject<Env> {
 
   private discardPostgres(name: string, err: unknown) {
     this.postgres = undefined;
+    this.dropWire({ code: INTERNAL_ERROR, message: POSTGRES_RESTARTED });
     console.error(`postgres for ${name} discarded after:`, err);
   }
 

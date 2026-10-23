@@ -1,7 +1,7 @@
 import { authorizeDatabase, forbidden, requestAccess, unauthorized, type Access } from "./access";
-import { DATABASE_NAME_HEADER, openDatabase, type Env } from "./database";
+import { DATABASE_NAME_HEADER, isSessionBusy, openDatabase, type Env } from "./database";
 import { DATABASE_NAME_RULE, isDatabaseName, MCP_NAME } from "./database-name";
-import { BAD_REQUEST, INTERNAL_SERVER_ERROR, UPGRADE_REQUIRED } from "./http-status";
+import { BAD_REQUEST, CONFLICT, INTERNAL_SERVER_ERROR, UPGRADE_REQUIRED } from "./http-status";
 import { handleMcp } from "./mcp";
 import { mintScopedToken, nowSeconds, type TokenClaims } from "./scoped-token";
 import { errorMessage, jsonResponse } from "./serialize";
@@ -12,6 +12,8 @@ const MCP_PATH = `/${MCP_NAME}`;
 const TOKEN_SEGMENT = "token";
 const WIRE_SEGMENT = "wire";
 const WEBSOCKET = "websocket";
+const WIRE_FAILED = "wire_failed";
+const WIRE_CONNECTION_OPEN = "wire_connection_open";
 const TTL_PARAM = "ttl";
 const TTL_NEVER = "never";
 const TTL_PATTERN = /^[1-9]\d*$/;
@@ -78,13 +80,18 @@ function mintRoute(request: Request, access: Access, name: string): Response | P
   return access.kind === "admin" ? mintToken(request, access.secret, name) : forbidden(SCOPED_CANNOT_MINT);
 }
 
+function failure(name: string, error: string, err: unknown): Response {
+  const message = errorMessage(err);
+  console.error(`${error} for ${name}: ${message}`);
+  return jsonResponse({ error, message }, { status: INTERNAL_SERVER_ERROR });
+}
+
 async function respond(name: string, error: string, run: () => Promise<object>): Promise<Response> {
   try {
-    return jsonResponse(await run());
+    const result = await run();
+    return isSessionBusy(result) ? jsonResponse({ error: WIRE_CONNECTION_OPEN, message: result.busy }, { status: CONFLICT }) : jsonResponse(result);
   } catch (err) {
-    const message = errorMessage(err);
-    console.error(`${error} for ${name}: ${message}`);
-    return jsonResponse({ error, message }, { status: INTERNAL_SERVER_ERROR });
+    return failure(name, error, err);
   }
 }
 
@@ -108,9 +115,7 @@ async function connectWire(request: Request, env: Env, name: string): Promise<Re
   try {
     return await openDatabase(env, name).fetch(request.url, { headers });
   } catch (err) {
-    const message = errorMessage(err);
-    console.error(`wire_failed for ${name}: ${message}`);
-    return jsonResponse({ error: "wire_failed", message }, { status: INTERNAL_SERVER_ERROR });
+    return failure(name, WIRE_FAILED, err);
   }
 }
 
