@@ -130,8 +130,16 @@ export class PostgresDatabase extends DurableObject<Env> {
       return { results, leftTransactionOpen: await rollbackIfOpen(pg) };
     } catch (err) {
       if (!(err instanceof messages.DatabaseError)) this.discardPostgres(name, err);
-      else await rollbackIfOpen(pg);
+      else await this.rollbackAfterFailure(name, pg);
       throw err;
+    }
+  }
+
+  private async rollbackAfterFailure(name: string, pg: PGlite) {
+    try {
+      await rollbackIfOpen(pg);
+    } catch (rollbackErr) {
+      this.discardPostgres(name, rollbackErr);
     }
   }
 

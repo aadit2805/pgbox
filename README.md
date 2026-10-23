@@ -61,7 +61,7 @@ The traffic between the proxy and the Worker is TLS when `PGBOX_URL` is `https:/
 What to expect:
 
 - One wire connection per database at a time. A second one gets `too many connections` (SQLSTATE 53300) and is closed. Set your ORM's pool size to 1.
-- While a wire connection is open, HTTP and MCP queries to that database get a 409 (`wire_connection_open`) instead of running, because the connection and those queries would share one Postgres session. Disconnect to use them again.
+- While a wire connection is open, HTTP queries to that database get a 409 (`wire_connection_open`) and MCP calls get a tool error instead of running, because the connection and those queries would share one Postgres session. Disconnect to use them again.
 - An HTTP or MCP request can't leave a transaction open. If one does (`begin` without `commit`, or an error after `begin`), it is rolled back and the request fails, so the next wire connection never starts inside someone else's transaction.
 - Disconnecting rolls back any open transaction, including a batch that never reached its Sync, and runs `discard all`.
 - A connection with no traffic for 10 minutes is closed with SQLSTATE 57P05.
