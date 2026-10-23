@@ -1,10 +1,12 @@
 import { DurableObject } from "cloudflare:workers";
 import { messages, type PGlite } from "@electric-sql/pglite";
 import { createPostgres, wasmMemoryMegabytes } from "./postgres";
+import { MB } from "./postgres-settings";
 import { StorageFS, type SqlValue } from "./storage-fs";
 import { unpackTemplate } from "./unpack-template";
 
 const TEMPLATE_URL = "https://assets/template.tar.gz";
+const STORAGE_MB_DIGITS = 1;
 
 const toStorageValue = (value: SqlValue): SqlStorageValue => (value instanceof Uint8Array ? value.slice().buffer : value);
 
@@ -27,6 +29,7 @@ export interface QueryResult {
   rows: Record<string, Cell>[];
   startedFromTemplate: boolean;
   wasmMemoryMB: number;
+  storageMB: number;
 }
 
 export class PostgresDatabase extends DurableObject<Env> {
@@ -37,7 +40,7 @@ export class PostgresDatabase extends DurableObject<Env> {
     const pg = await this.boot(name);
     try {
       const results = await pg.exec(sql);
-      return { rows: results.at(-1)?.rows ?? [], startedFromTemplate: this.startedFromTemplate, wasmMemoryMB: wasmMemoryMegabytes(pg) };
+      return { rows: results.at(-1)?.rows ?? [], startedFromTemplate: this.startedFromTemplate, wasmMemoryMB: wasmMemoryMegabytes(pg), storageMB: this.storageMegabytes() };
     } catch (err) {
       if (!(err instanceof messages.DatabaseError)) this.discardPostgres(name, err);
       throw err;
@@ -51,6 +54,10 @@ export class PostgresDatabase extends DurableObject<Env> {
     });
     console.debug(`database ${name} deleted`);
     return { deleted: name };
+  }
+
+  private storageMegabytes(): number {
+    return Number((this.ctx.storage.sql.databaseSize / MB).toFixed(STORAGE_MB_DIGITS));
   }
 
   private async closePostgres(name: string) {

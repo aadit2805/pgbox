@@ -32,6 +32,11 @@ const failureReasons = (results) => [...new Set(results.filter((r) => !r.ok).map
 
 const percentile = (values, p) => [...values].sort((a, b) => a - b)[Math.min(values.length - 1, Math.floor((p / 100) * values.length))];
 
+async function dropAll(names) {
+  const first = await Promise.all(names.map(drop));
+  return Promise.all(first.map((result, i) => (result.ok ? result : drop(names[i]))));
+}
+
 async function growth() {
   console.log("\n== one database, growing until something breaks ==");
   const db = `growth-${RUN}`;
@@ -45,21 +50,21 @@ async function growth() {
 
 async function grow(db) {
   const created = await sql(db, "create table t(id serial primary key, v text)");
-  console.log(`created: ${created.ok ? "ok" : created.message}, wall ${created.wallMs}ms, wasm ${created.wasmMemoryMB}MB`);
+  console.log(`created: ${created.ok ? "ok" : created.message}, wall ${created.wallMs}ms, wasm ${created.wasmMemoryMB}MB, storage ${created.storageMB}MB`);
   for (let batch = 1; batch <= GROWTH_BATCHES; batch++) {
     const r = await sql(db, `insert into t(v) select repeat(md5(random()::text), 6) from generate_series(1, ${GROWTH_ROWS_PER_BATCH}); select pg_size_pretty(pg_database_size(current_database())) as size`);
     if (!r.ok) {
       console.log(`batch ${batch}: FAILED (${r.status}) ${r.message}`);
       return;
     }
-    console.log(`batch ${batch}: db ${r.rows[0].size}, wasm ${r.wasmMemoryMB}MB, wall ${r.wallMs}ms`);
+    console.log(`batch ${batch}: db ${r.rows[0].size}, storage ${r.storageMB}MB, wasm ${r.wasmMemoryMB}MB, wall ${r.wallMs}ms`);
   }
 }
 
 async function fanout(n) {
   const names = Array.from({ length: n }, (_, i) => `fan-${RUN}-${n}-${i}`);
   const results = await Promise.all(names.map((db) => sql(db, "create table t(id int); insert into t select generate_series(1, 1000); select count(*) from t")));
-  const dropped = await Promise.all(names.map(drop));
+  const dropped = await dropAll(names);
   const ok = results.filter((r) => r.ok);
   const walls = ok.map((r) => r.wallMs);
   console.log(`${n} at once: ${ok.length} ok, ${n - ok.length} failed | wall p50 ${percentile(walls, 50)}ms p95 ${percentile(walls, 95)}ms | wasm ${ok[0]?.wasmMemoryMB}MB`);
