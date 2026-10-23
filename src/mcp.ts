@@ -1,3 +1,4 @@
+import { accessDenial, type Access } from "./access";
 import { DATABASE_NAME_RULE, isDatabaseName, openDatabase, type Env } from "./database";
 import { errorMessage, jsonResponse, toJson } from "./serialize";
 
@@ -96,11 +97,13 @@ const TOOL_HANDLERS: Record<string, ToolHandler> = {
   delete_database: (db, database) => db.destroy(database),
 };
 
-async function callTool(env: Env, params: Params) {
+async function callTool(env: Env, access: Access, params: Params) {
   const handler = typeof params.name === "string" ? TOOL_HANDLERS[params.name] : undefined;
   if (!handler) throw new RpcError(INVALID_PARAMS, `unknown tool ${String(params.name)}`);
   const args = isRecord(params.arguments) ? params.arguments : {};
   const database = databaseParam(args);
+  const denial = accessDenial(access, database);
+  if (denial !== undefined) return textResult(denial, true);
   try {
     return textResult(toJson(await handler(openDatabase(env, database), database, args)));
   } catch (err) {
@@ -110,11 +113,11 @@ async function callTool(env: Env, params: Params) {
   }
 }
 
-async function dispatch(env: Env, { method, params }: RpcRequest): Promise<unknown> {
+async function dispatch(env: Env, access: Access, { method, params }: RpcRequest): Promise<unknown> {
   if (method === "initialize") return { protocolVersion: PROTOCOL_VERSION, capabilities: { tools: {} }, serverInfo: SERVER_INFO };
   if (method === "ping") return {};
   if (method === "tools/list") return { tools: TOOLS };
-  if (method === "tools/call") return callTool(env, params);
+  if (method === "tools/call") return callTool(env, access, params);
   throw new RpcError(METHOD_NOT_FOUND, `method ${method} not found`);
 }
 
@@ -133,20 +136,20 @@ function parseRequest(body: Params): RpcRequest {
   return { id: isRequestId(body.id) ? body.id : undefined, method: body.method, params: isRecord(body.params) ? body.params : {} };
 }
 
-async function handleMessage(env: Env, body: unknown, setId: (id: RequestId) => void): Promise<Response> {
+async function handleMessage(env: Env, access: Access, body: unknown, setId: (id: RequestId) => void): Promise<Response> {
   if (!isRecord(body)) throw invalidRequest("expected a single JSON-RPC message; batches are not supported");
   if (isRequestId(body.id)) setId(body.id);
   if (isClientResponse(body)) return new Response(null, { status: ACCEPTED });
   const rpc = parseRequest(body);
   if (rpc.id === undefined) return new Response(null, { status: ACCEPTED });
-  return reply(rpc.id, { result: await dispatch(env, rpc) });
+  return reply(rpc.id, { result: await dispatch(env, access, rpc) });
 }
 
-export async function handleMcp(request: Request, env: Env): Promise<Response> {
+export async function handleMcp(request: Request, env: Env, access: Access): Promise<Response> {
   if (request.method !== "POST") return new Response("MCP here only accepts POST", { status: METHOD_NOT_ALLOWED, headers: { allow: "POST" } });
   let id: RequestId | null = null;
   try {
-    return await handleMessage(env, await readBody(request), (found) => (id = found));
+    return await handleMessage(env, access, await readBody(request), (found) => (id = found));
   } catch (err) {
     if (err instanceof RpcError) return reply(id, { error: { code: err.code, message: err.message } }, err.status);
     const message = errorMessage(err);
