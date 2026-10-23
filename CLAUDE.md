@@ -2,9 +2,10 @@
 
 One Cloudflare Worker, one Durable Object class. `POST /<name>` with SQL in the body runs it
 against that name's own Postgres; a new name gets a new, empty database. `DELETE /<name>`
-wipes that database's storage. `POST /mcp` is a stateless MCP server (JSON responses, no
+wipes that database's storage. `POST /<name>/token[?ttl=<seconds>]` (admin token only) mints a
+token scoped to that one name. `POST /mcp` is a stateless MCP server (JSON responses, no
 SSE) exposing `run_sql`, `list_tables` and `delete_database`; the name `mcp` is reserved for it.
-Database names are 1 to 128 characters with no `/`, on both routes. Each Durable Object
+Database names are 1 to 128 characters with no `/`, on every route. Each Durable Object
 runs PGlite (Postgres compiled to wasm) and keeps its data directory in the object's SQLite
 storage, one row per 8 KB page, so memory holds only what Postgres is using.
 
@@ -30,7 +31,9 @@ TypeScript, strict, no `any`. Node 24 (`.nvmrc`; `nvm use`); Wrangler refuses ol
 
 ```
 src/
-  index.ts             fetch handler: bearer check, route /<name> to its Durable Object
+  index.ts             fetch handler: route /<name> to its Durable Object, mint /<name>/token
+  access.ts            request -> Access (admin or scoped to one name); accessDenial, authorizeDatabase
+  scoped-token.ts      stateless pgbox_<payload>.<HMAC> tokens, signed with a key derived from PGBOX_TOKEN
   database.ts          PostgresDatabase Durable Object: one Postgres, booted once, queries
   postgres.ts          createPostgres({ fs, onLog }): PGlite with the Workers shims
   unpack-template.ts   streams the gzipped template tar into StorageFS one page at a time
@@ -77,8 +80,13 @@ Each is a hard limit of the Workers runtime, found by running it, not guessed:
 
 ## Rules
 
-- Every database is reachable only through the Worker, behind `PGBOX_TOKEN`. The template asset
-  is never served to a request.
+- Every database is reachable only through the Worker, behind `PGBOX_TOKEN` or a token scoped to
+  it. The template asset is never served to a request.
+- Every authorization decision goes through `access.ts`: `requestAccess` once per request, then
+  `accessDenial` for a database name (or `authorizeDatabase` for both in one call). A new route
+  that touches a database uses it, never its own token check.
+- Scoped tokens are stateless: nothing stores or lists them. Rotating `PGBOX_TOKEN` revokes every
+  one; a scoped token never mints another.
 - Postgres data lives in Durable Object storage through `StorageFS`. Never reintroduce whole-
   directory dumps or in-memory copies of PGDATA; that is the 20 MB ceiling we removed.
 - Memory numbers come from production (`wrangler tail` shows `Exceeded Memory Limit`), not from

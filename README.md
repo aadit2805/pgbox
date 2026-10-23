@@ -23,6 +23,27 @@ claude mcp add --transport http pgbox https://<your-worker>.workers.dev/mcp \
 
 The agent picks a database name and gets the same data back in every later session. If Claude Code says the server needs authentication, the bearer header is missing or wrong.
 
+## Scoped tokens
+
+`PGBOX_TOKEN` unlocks every database. To hand out access to just one, mint a token for it:
+
+```sh
+curl -X POST "https://<your-worker>.workers.dev/my-agent/token?ttl=86400" \
+  -H "Authorization: Bearer $PGBOX_TOKEN"
+# {"token":"pgbox_…","database":"my-agent","expiresAt":1792796328}
+```
+
+`ttl` is in seconds, up to one year. Leave it out for a token that never expires. `expiresAt` is a Unix time, or `null`.
+
+A scoped token can `POST` and `DELETE` its own database and nothing else: other names get a 403, and it can't mint tokens. Over MCP it can only pass its own name as `database`:
+
+```sh
+claude mcp add --transport http pgbox-my-agent https://<your-worker>.workers.dev/mcp \
+  --header "Authorization: Bearer pgbox_…"
+```
+
+Tokens are signed with a key derived from `PGBOX_TOKEN` and aren't stored anywhere, so one can't be revoked on its own. Changing `PGBOX_TOKEN` revokes all of them.
+
 ## Run it
 
 Needs a Cloudflare account on Workers Paid, because the bundle is about 6.5 MB.
