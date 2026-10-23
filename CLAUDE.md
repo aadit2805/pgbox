@@ -4,7 +4,9 @@ One Cloudflare Worker, one Durable Object class. `POST /<name>` with SQL in the 
 against that name's own Postgres; a new name gets a new, empty database. `DELETE /<name>` wipes
 that database's storage. `POST /<name>/token[?ttl=<seconds>|never]` (admin token only) mints a
 token scoped to that one name, lasting 30 days by default. Over HTTP an out-of-scope name is a
-403; over MCP it is a tool error (`isError`). `POST /mcp` is a stateless MCP server (JSON
+403; over MCP it is a tool error (`isError`). `GET /<name>/wire` upgrades to a WebSocket whose binary frames are
+raw Postgres protocol bytes, one connection per database at a time; `scripts/proxy.mjs` exposes
+it as a local TCP port for psql and ORMs. `POST /mcp` is a stateless MCP server (JSON
 responses, no SSE) exposing `run_sql`, `list_tables` and `delete_database`; the name `mcp` is
 reserved for it. Database names are 1 to 128 characters with no `/` and never `mcp`, on every
 route (`database-name.ts`). Each Durable Object runs PGlite (Postgres compiled to wasm) and keeps
@@ -24,6 +26,8 @@ TypeScript, strict, no `any`. Node 24 (`.nvmrc`; `nvm use`); Wrangler refuses ol
   every push to `main`, so a push is a production deploy.
 - `PGBOX_URL=https://… node scripts/loadtest.mjs [growth|fanout|all]` — against the deployed
   Worker; reads the token from `.pgbox-token` and deletes every database it creates.
+- `PGBOX_URL=… PGBOX_TOKEN=… npm run proxy -- <name> [--port 5432]` — local Postgres port for
+  that database over `/<name>/wire`; the token may be admin or scoped to `<name>`.
 - `npm run patch-wasm` (runs on `npm install`) — rewrites `pglite.wasm`'s memory floor into
   `patched/pglite.wasm`.
 - `npm run template` — builds `public/template.tar.gz`, the empty cluster new databases start
@@ -34,12 +38,13 @@ TypeScript, strict, no `any`. Node 24 (`.nvmrc`; `nvm use`); Wrangler refuses ol
 
 ```
 src/
-  index.ts             fetch handler: route /<name> to its Durable Object, mint /<name>/token
+  index.ts             fetch handler: route /<name> and /<name>/wire to its Durable Object, mint /<name>/token
   access.ts            request -> Access (admin or scoped to one name); accessDenial, authorizeDatabase
   scoped-token.ts      stateless pgbox_<payload>.<HMAC> tokens, signed with a key derived from PGBOX_TOKEN
   database-name.ts     isDatabaseName and MCP_NAME, shared by every route and the token payload
   http-status.ts       every HTTP status code the Worker returns
-  database.ts          PostgresDatabase Durable Object: one Postgres, booted once, queries
+  database.ts          PostgresDatabase Durable Object: one Postgres, booted once, queries, the wire connection
+  wire.ts              Postgres protocol framing: MessageReader, ReadyForQuery status, error responses
   postgres.ts          createPostgres({ fs, onLog }): PGlite with the Workers shims
   unpack-template.ts   streams the gzipped template tar into StorageFS one page at a time
   postgres-settings.ts POSTGRES_SETTINGS (small caches, capped WAL, quiet logs), shared with the test and template build
@@ -48,6 +53,9 @@ src/
   serialize.ts         JSON for Postgres values (int8 as string, bytea as hex) and error messages
   bearer.ts            timing-safe Authorization: Bearer check
   precompiled/         wasm Emscripten would compile at runtime, shipped compiled, matched by bytes
+scripts/
+  proxy.mjs            local TCP port -> WebSocket /<name>/wire, zero dependencies (`npm run proxy -- <name>`)
+  loadtest.mjs         growth and fan-out load against the deployed Worker
 patched/
   patch-memory.py      lowers a wasm memory's minimum page count
   make-template.mjs    initdb once in Node, dump the empty cluster to public/template.tar.gz
@@ -77,6 +85,18 @@ Each is a hard limit of the Workers runtime, found by running it, not guessed:
   once. `unpack-template.ts` streams it into storage one 8 KB page at a time instead.
 - **PGlite runs no background checkpointer**, so WAL grew with every write and was never
   recycled. `checkpointIfWalFull` checkpoints after a query once WAL passes `MAX_WAL_MB`.
+- **PGlite is one Postgres session with no postmaster.** It answers the startup packet itself
+  and accepts any user or password, so there is no auth on the wire beyond the WebSocket
+  upgrade. `PostgresDatabase` lets one wire connection hold the session and serializes it with
+  HTTP queries through one `Mutex`; HTTP is refused while the wire connection is mid-batch or in
+  a transaction (`leavesSessionIdle`), and a disconnect rolls back and runs `discard all`.
+- **PGlite exits the whole backend on `COPY FROM STDIN`** when the data arrives in a later
+  call, so `backendInput` appends a CopyFail to every Query and Execute (Postgres ignores
+  CopyFail outside COPY) and `clientOutput` drops the CopyInResponse.
+- **`execProtocolRawStream` leaves its callback installed**, so the next `exec` would write to
+  it. The wire path uses buffered `execProtocolRaw` instead.
+- **Durable Object WebSockets default to `Blob` frames**, so the server socket sets
+  `binaryType = "arraybuffer"` before `accept()`.
 - **`process.versions.node` exists** under Workers, so Emscripten takes its Node path and calls
   `process.binding`. `process` is hidden for the duration of `PGlite.create`.
 - **`import.meta.url` is undefined**, so `wrangler.jsonc` defines it.
@@ -90,6 +110,8 @@ Each is a hard limit of the Workers runtime, found by running it, not guessed:
 - Every authorization decision goes through `access.ts`: `requestAccess` once per request, then
   `accessDenial` for a database name (or `authorizeDatabase` for both in one call). A new route
   that touches a database uses it, never its own token check.
+- Every PGlite call in `PostgresDatabase` runs inside `this.session.runExclusive`, so HTTP
+  queries never land between wire messages or inside a wire transaction. Never nest it.
 - Scoped tokens are stateless: nothing stores or lists them. Rotating `PGBOX_TOKEN` revokes every
   one; a scoped token never mints another.
 - Postgres data lives in Durable Object storage through `StorageFS`. Never reintroduce whole-

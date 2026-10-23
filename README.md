@@ -44,6 +44,31 @@ claude mcp add --transport http pgbox-my-agent https://<your-worker>.workers.dev
 
 Tokens are signed with a key derived from `PGBOX_TOKEN` and aren't stored anywhere, so one can't be revoked on its own. Changing `PGBOX_TOKEN` revokes all of them.
 
+## Connect with psql or an ORM
+
+`GET /<name>/wire` carries the Postgres wire protocol over a WebSocket. `scripts/proxy.mjs` (Node 24, no dependencies) turns that into a local Postgres port:
+
+```sh
+PGBOX_URL=https://<your-worker>.workers.dev PGBOX_TOKEN=$PGBOX_TOKEN \
+  npm run proxy -- my-agent --port 5432
+psql postgresql://postgres@127.0.0.1:5432/postgres
+```
+
+Any client that speaks Postgres can then use that URL: node-postgres, Drizzle, Prisma, `psql`. The password is ignored, because the proxy already sent the token. A scoped token for `my-agent` works as `PGBOX_TOKEN` too. The user and database name in the URL don't matter either; the database is the name you gave the proxy.
+
+The traffic between the proxy and the Worker is TLS when `PGBOX_URL` is `https://`, and the local port is plain TCP on `127.0.0.1`, so the client must not require SSL (`sslmode=disable` or `prefer`).
+
+What to expect:
+
+- One wire connection per database at a time. A second one gets `too many connections` (SQLSTATE 53300). Set your ORM's pool size to 1.
+- HTTP and MCP queries keep working while a wire connection is open, except while it is inside a transaction. Then they fail with an error saying so, rather than waiting or running inside that transaction.
+- The wire connection and HTTP queries share one Postgres session, so a `SET` on the wire connection applies to HTTP queries until it disconnects. Disconnecting rolls back any open transaction and runs `discard all`.
+- `COPY FROM STDIN` (and `psql`'s `\copy ... from`) fails with an error. `COPY TO STDOUT` works.
+- Query cancellation (Ctrl-C in `psql`) doesn't work: the cancel request arrives as a second connection and is refused.
+- A single response is held in memory before it's sent, so select large results in pages.
+- The Durable Object stays awake for as long as the connection is open, so an idle connection is billed as active time.
+- Prisma's `migrate dev` needs a shadow database it can create, which pgbox can't. `prisma db push` and `prisma migrate deploy` don't need one.
+
 ## Run it
 
 Needs a Cloudflare account on Workers Paid, because the bundle is about 6.5 MB.
