@@ -20,7 +20,9 @@ TypeScript, strict, no `any`. Node 24 (`.nvmrc`; `nvm use`); Wrangler refuses ol
 - `npm run dev` — local Worker on `wrangler dev`.
 - `npm run typecheck` — must pass before any commit.
 - `npm test` — `test/scoped-token.test.ts` (mint/verify, tampering, non-canonical encoding,
-  expiry, garbage payloads), then `test/storage-fs.test.ts`: real PGlite on `node:sqlite`
+  expiry, garbage payloads), `test/wire.test.ts` (framing across and within frames, no early
+  ReadyForQuery, COPY FROM failing cleanly, session reset, message cap, on real PGlite), then
+  `test/storage-fs.test.ts`: real PGlite on `node:sqlite`
   through `StorageFS` (fresh boot from the template, 250k rows, reopen, update survives reopen).
 - `npm run deploy` — `wrangler deploy` (builds the template first). Workers Builds runs it on
   every push to `main`, so a push is a production deploy.
@@ -44,7 +46,7 @@ src/
   database-name.ts     isDatabaseName and MCP_NAME, shared by every route and the token payload
   http-status.ts       every HTTP status code the Worker returns
   database.ts          PostgresDatabase Durable Object: one Postgres, booted once, queries, the wire connection
-  wire.ts              Postgres protocol framing: MessageReader, ReadyForQuery status, error responses
+  wire.ts              Postgres protocol framing: MessageReader, exchange (PGlite reply rewriting), endSession, error responses
   postgres.ts          createPostgres({ fs, onLog }): PGlite with the Workers shims
   unpack-template.ts   streams the gzipped template tar into StorageFS one page at a time
   postgres-settings.ts POSTGRES_SETTINGS (small caches, capped WAL, quiet logs), shared with the test and template build
@@ -87,9 +89,13 @@ Each is a hard limit of the Workers runtime, found by running it, not guessed:
   recycled. `checkpointIfWalFull` checkpoints after a query once WAL passes `MAX_WAL_MB`.
 - **PGlite is one Postgres session with no postmaster.** It answers the startup packet itself
   and accepts any user or password, so there is no auth on the wire beyond the WebSocket
-  upgrade. `PostgresDatabase` lets one wire connection hold the session and serializes it with
-  HTTP queries through one `Mutex`; HTTP is refused while the wire connection is mid-batch or in
-  a transaction (`leavesSessionIdle`), and a disconnect rolls back and runs `discard all`.
+  upgrade. `PostgresDatabase` lets one wire connection hold the session at a time, refuses HTTP
+  and MCP queries (409 `wire_connection_open`) while it is open, rolls back any transaction an
+  HTTP request leaves open, and on disconnect runs `endSession` (rollback, Sync, `discard all`).
+  The rollback goes before the Sync because a Sync commits a batch the client never finished.
+- **PGlite sends ReadyForQuery right after an error on any extended-protocol message**, before the
+  client's Sync, which desyncs pipelining clients. `clientOutput` drops ReadyForQuery from the
+  reply to anything that doesn't end a batch (Query, Sync, CopyDone, CopyFail, startup).
 - **PGlite exits the whole backend on `COPY FROM STDIN`** when the data arrives in a later
   call, so `backendInput` appends a CopyFail to every Query and Execute (Postgres ignores
   CopyFail outside COPY) and `clientOutput` drops the CopyInResponse.
@@ -110,8 +116,11 @@ Each is a hard limit of the Workers runtime, found by running it, not guessed:
 - Every authorization decision goes through `access.ts`: `requestAccess` once per request, then
   `accessDenial` for a database name (or `authorizeDatabase` for both in one call). A new route
   that touches a database uses it, never its own token check.
-- Every PGlite call in `PostgresDatabase` runs inside `this.session.runExclusive`, so HTTP
-  queries never land between wire messages or inside a wire transaction. Never nest it.
+- Every PGlite call in `PostgresDatabase` runs inside `this.session.runExclusive`. Never nest it.
+  HTTP and MCP never share the session with an open wire connection, and never leave a
+  transaction open for the next user.
+- Wire limits are named constants: `MAX_MESSAGE_MB` and `MAX_QUEUED_MB` in `wire.ts`,
+  `WIRE_IDLE_TIMEOUT_MINUTES` in `database.ts`. Queued bytes are counted outside the mutex.
 - Scoped tokens are stateless: nothing stores or lists them. Rotating `PGBOX_TOKEN` revokes every
   one; a scoped token never mints another.
 - Postgres data lives in Durable Object storage through `StorageFS`. Never reintroduce whole-
