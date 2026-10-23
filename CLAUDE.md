@@ -67,6 +67,8 @@ Each is a hard limit of the Workers runtime, found by running it, not guessed:
 - **PGlite's `loadDataDir` holds the whole tar in memory** (compressed, unpacked, and split
   into files: about 60 MB), which ran isolates out of memory when many databases started at
   once. `unpack-template.ts` streams it into storage one 8 KB page at a time instead.
+- **PGlite runs no background checkpointer**, so WAL grew with every write and was never
+  recycled. `checkpointIfWalFull` checkpoints after a query once WAL passes `MAX_WAL_MB`.
 - **`process.versions.node` exists** under Workers, so Emscripten takes its Node path and calls
   `process.binding`. `process` is hidden for the duration of `PGlite.create`.
 - **`import.meta.url` is undefined**, so `wrangler.jsonc` defines it.

@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { messages, type PGlite } from "@electric-sql/pglite";
-import { createPostgres, wasmMemoryMegabytes } from "./postgres";
+import { checkpointIfWalFull, createPostgres, wasmMemoryMegabytes } from "./postgres";
 import { MB } from "./postgres-settings";
 import { StorageFS, type SqlValue } from "./storage-fs";
 import { unpackTemplate } from "./unpack-template";
@@ -40,6 +40,7 @@ export class PostgresDatabase extends DurableObject<Env> {
     const pg = await this.boot(name);
     try {
       const results = await pg.exec(sql);
+      await this.checkpoint(name, pg);
       return { rows: results.at(-1)?.rows ?? [], startedFromTemplate: this.startedFromTemplate, wasmMemoryMB: wasmMemoryMegabytes(pg), storageMB: this.storageMegabytes() };
     } catch (err) {
       if (!(err instanceof messages.DatabaseError)) this.discardPostgres(name, err);
@@ -77,6 +78,15 @@ export class PostgresDatabase extends DurableObject<Env> {
       throw err;
     });
     return this.postgres;
+  }
+
+  private async checkpoint(name: string, pg: PGlite) {
+    try {
+      await checkpointIfWalFull(pg);
+    } catch (err) {
+      if (err instanceof messages.DatabaseError) console.error(`checkpoint for ${name} failed: ${err.message}`);
+      else this.discardPostgres(name, err);
+    }
   }
 
   private discardPostgres(name: string, err: unknown) {

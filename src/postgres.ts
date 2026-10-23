@@ -2,12 +2,14 @@ import { PGlite } from "@electric-sql/pglite";
 import pgliteData from "@electric-sql/pglite/dist/pglite.data";
 import pgliteWasm from "../patched/pglite.wasm";
 import { PRECOMPILED } from "./precompiled/index";
-import { MB, POSTGRES_SETTINGS } from "./postgres-settings";
+import { MAX_WAL_MB, MB, POSTGRES_SETTINGS } from "./postgres-settings";
 import type { StorageFS } from "./storage-fs";
 
 type ModuleConstructor = new (bytes: BufferSource) => WebAssembly.Module;
 
 const INITIAL_WASM_MEMORY_BYTES = 32 * MB;
+const WAL_SINCE_CHECKPOINT_SQL = "select pg_wal_lsn_diff(pg_current_wal_lsn(), redo_lsn)::float8 as bytes from pg_control_checkpoint()";
+const CHECKPOINT_SQL = "checkpoint";
 const wasmNamespace: object = WebAssembly;
 const RuntimeModule: ModuleConstructor = Reflect.get(wasmNamespace, "Module");
 const nodeProcess: unknown = Reflect.get(globalThis, "process");
@@ -64,6 +66,13 @@ export function createPostgres({ fs, onLog }: PostgresOptions): Promise<PGlite> 
       },
     }),
   );
+}
+
+// PGlite has no background checkpointer, so WAL is never recycled on its own.
+export async function checkpointIfWalFull(pg: PGlite): Promise<void> {
+  if (pg.isInTransaction()) return;
+  const { rows } = await pg.query<{ bytes: number }>(WAL_SINCE_CHECKPOINT_SQL);
+  if ((rows[0]?.bytes ?? 0) > MAX_WAL_MB * MB) await pg.exec(CHECKPOINT_SQL);
 }
 
 export function wasmMemoryMegabytes(pg: PGlite): number {
