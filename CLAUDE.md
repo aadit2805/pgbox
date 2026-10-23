@@ -16,7 +16,8 @@ TypeScript, strict, no `any`. Node 24 (`.nvmrc`; `nvm use`); Wrangler refuses ol
 - `npm run typecheck` — must pass before any commit.
 - `npm test` — `test/storage-fs.test.ts`: real PGlite on `node:sqlite` through `StorageFS`
   (fresh boot from the template, 250k rows, reopen, update survives reopen).
-- `npm run deploy` — `wrangler deploy` (builds the template first).
+- `npm run deploy` — `wrangler deploy` (builds the template first). Workers Builds runs it on
+  every push to `main`, so a push is a production deploy.
 - `PGBOX_URL=https://… node scripts/loadtest.mjs [growth|fanout|all]` — against the deployed
   Worker; reads the token from `.pgbox-token` and deletes every database it creates.
 - `npm run patch-wasm` (runs on `npm install`) — rewrites `pglite.wasm`'s memory floor into
@@ -33,7 +34,7 @@ src/
   database.ts          PostgresDatabase Durable Object: one Postgres, booted once, queries
   postgres.ts          createPostgres({ fs, onLog }): PGlite with the Workers shims
   unpack-template.ts   streams the gzipped template tar into StorageFS one page at a time
-  postgres-settings.ts POSTGRES_SETTINGS (small caches, no failing SQL in logs), shared with the test
+  postgres-settings.ts POSTGRES_SETTINGS (small caches, capped WAL, quiet logs), shared with the test and template build
   storage-fs.ts        StorageFS: PGlite filesystem on a synchronous SQL exec (DO storage or node:sqlite)
   mcp.ts               MCP over HTTP: JSON-RPC initialize, tools/list, tools/call
   serialize.ts         JSON for Postgres values (int8 as string, bytea as hex) and error messages
@@ -60,7 +61,9 @@ Each is a hard limit of the Workers runtime, found by running it, not guessed:
   `postgresqlconf` shrinks `shared_buffers` and friends.
 - **initdb boots a second Postgres.** PGlite's initdb path creates a throwaway PGlite and a
   separate initdb instance. New databases instead load `public/template.tar.gz`, built with
-  `--wal-segsize=1` so the cluster is 29 MB instead of 40.
+  `--wal-segsize=1`, without `template0`/`template1` and without spare WAL segments, so a new
+  database stores about 10.6 MB instead of 40. `min_wal_size`/`max_wal_size` keep WAL from
+  growing to Postgres's 80 MB default floor.
 - **PGlite's `loadDataDir` holds the whole tar in memory** (compressed, unpacked, and split
   into files: about 60 MB), which ran isolates out of memory when many databases started at
   once. `unpack-template.ts` streams it into storage one 8 KB page at a time instead.
