@@ -10,7 +10,7 @@ curl -X POST https://<your-worker>.workers.dev/my-agent \
   -d "create table notes (body text); select now()"
 ```
 
-A new name gets a new, empty database. `DELETE /my-agent` wipes it.
+A new name gets a new, empty database. `DELETE /my-agent` wipes it. The name `mcp` is reserved.
 
 ## Use it from an agent
 
@@ -33,9 +33,9 @@ curl -X POST "https://<your-worker>.workers.dev/my-agent/token?ttl=86400" \
 # {"token":"pgbox_…","database":"my-agent","expiresAt":1792796328}
 ```
 
-`ttl` is in seconds, up to one year. Leave it out for a token that never expires. `expiresAt` is a Unix time, or `null`.
+`ttl` is in seconds, up to one year. Without it a token lasts 30 days. `ttl=never` makes one that never expires. `expiresAt` is a Unix time, or `null` for a token that never expires.
 
-A scoped token can `POST` and `DELETE` its own database and nothing else: other names get a 403, and it can't mint tokens. Over MCP it can only pass its own name as `database`:
+A scoped token can `POST` and `DELETE` its own database and nothing else. Over HTTP, any other name gets a 403, and so does minting a token. Over MCP it can only pass its own name as `database`. Any other name comes back as a tool error (`isError: true`) instead of a 403:
 
 ```sh
 claude mcp add --transport http pgbox-my-agent https://<your-worker>.workers.dev/mcp \

@@ -1,13 +1,15 @@
 # pgbox — a real Postgres per name, on Cloudflare
 
 One Cloudflare Worker, one Durable Object class. `POST /<name>` with SQL in the body runs it
-against that name's own Postgres; a new name gets a new, empty database. `DELETE /<name>`
-wipes that database's storage. `POST /<name>/token[?ttl=<seconds>]` (admin token only) mints a
-token scoped to that one name. `POST /mcp` is a stateless MCP server (JSON responses, no
-SSE) exposing `run_sql`, `list_tables` and `delete_database`; the name `mcp` is reserved for it.
-Database names are 1 to 128 characters with no `/`, on every route. Each Durable Object
-runs PGlite (Postgres compiled to wasm) and keeps its data directory in the object's SQLite
-storage, one row per 8 KB page, so memory holds only what Postgres is using.
+against that name's own Postgres; a new name gets a new, empty database. `DELETE /<name>` wipes
+that database's storage. `POST /<name>/token[?ttl=<seconds>|never]` (admin token only) mints a
+token scoped to that one name, lasting 30 days by default. Over HTTP an out-of-scope name is a
+403; over MCP it is a tool error (`isError`). `POST /mcp` is a stateless MCP server (JSON
+responses, no SSE) exposing `run_sql`, `list_tables` and `delete_database`; the name `mcp` is
+reserved for it. Database names are 1 to 128 characters with no `/` and never `mcp`, on every
+route (`database-name.ts`). Each Durable Object runs PGlite (Postgres compiled to wasm) and keeps
+its data directory in the object's SQLite storage, one row per 8 KB page, so memory holds only
+what Postgres is using.
 
 TypeScript, strict, no `any`. Node 24 (`.nvmrc`; `nvm use`); Wrangler refuses older versions.
 
@@ -15,8 +17,9 @@ TypeScript, strict, no `any`. Node 24 (`.nvmrc`; `nvm use`); Wrangler refuses ol
 
 - `npm run dev` — local Worker on `wrangler dev`.
 - `npm run typecheck` — must pass before any commit.
-- `npm test` — `test/storage-fs.test.ts`: real PGlite on `node:sqlite` through `StorageFS`
-  (fresh boot from the template, 250k rows, reopen, update survives reopen).
+- `npm test` — `test/scoped-token.test.ts` (mint/verify, tampering, non-canonical encoding,
+  expiry, garbage payloads), then `test/storage-fs.test.ts`: real PGlite on `node:sqlite`
+  through `StorageFS` (fresh boot from the template, 250k rows, reopen, update survives reopen).
 - `npm run deploy` — `wrangler deploy` (builds the template first). Workers Builds runs it on
   every push to `main`, so a push is a production deploy.
 - `PGBOX_URL=https://… node scripts/loadtest.mjs [growth|fanout|all]` — against the deployed
@@ -34,6 +37,8 @@ src/
   index.ts             fetch handler: route /<name> to its Durable Object, mint /<name>/token
   access.ts            request -> Access (admin or scoped to one name); accessDenial, authorizeDatabase
   scoped-token.ts      stateless pgbox_<payload>.<HMAC> tokens, signed with a key derived from PGBOX_TOKEN
+  database-name.ts     isDatabaseName and MCP_NAME, shared by every route and the token payload
+  http-status.ts       every HTTP status code the Worker returns
   database.ts          PostgresDatabase Durable Object: one Postgres, booted once, queries
   postgres.ts          createPostgres({ fs, onLog }): PGlite with the Workers shims
   unpack-template.ts   streams the gzipped template tar into StorageFS one page at a time
