@@ -1,5 +1,5 @@
-import { accessDenial, type Access } from "./access";
-import { isSessionBusy, openDatabase, type Env } from "./database";
+import { accessDenial, copyDenial, type Access } from "./access";
+import { isRefused, isSessionBusy, openDatabase, type Env, type Refused, type SessionBusy } from "./database";
 import { DATABASE_NAME_RULE, isDatabaseName } from "./database-name";
 import { ACCEPTED, BAD_REQUEST, METHOD_NOT_ALLOWED, OK } from "./http-status";
 import { errorMessage, jsonResponse, toJson } from "./serialize";
@@ -13,6 +13,7 @@ const METHOD_NOT_FOUND = -32601;
 const INVALID_PARAMS = -32602;
 const INTERNAL_ERROR = -32603;
 const MAX_RESULT_CHARS = 100_000;
+const COPY_TOOL = "copy_database";
 
 const LIST_TABLES_SQL = `select table_schema as schema, table_name as table,
   string_agg(column_name || ' ' || data_type, ', ' order by ordinal_position) as columns
@@ -41,6 +42,16 @@ const TOOLS = [
     name: "delete_database",
     description: "Permanently delete a database and all of its data.",
     inputSchema: { type: "object", properties: { database: DATABASE_PARAM }, required: ["database"] },
+  },
+  {
+    name: COPY_TOOL,
+    description:
+      "Copy a database with all of its data to a new name, for example to try a migration on the copy first. The copy is independent: later writes to either one don't affect the other. Fails if the new name is already in use. Needs the admin token.",
+    inputSchema: {
+      type: "object",
+      properties: { database: DATABASE_PARAM, to: { type: "string", description: "Name for the copy. It must not have been used yet." } },
+      required: ["database", "to"],
+    },
   },
 ];
 
@@ -84,30 +95,39 @@ function stringParam(params: Params, key: string): string {
   return value;
 }
 
-function databaseParam(params: Params): string {
-  const name = stringParam(params, "database");
-  if (!isDatabaseName(name)) throw new RpcError(INVALID_PARAMS, `database must be ${DATABASE_NAME_RULE}`);
+function databaseParam(params: Params, key: string): string {
+  const name = stringParam(params, key);
+  if (!isDatabaseName(name)) throw new RpcError(INVALID_PARAMS, `${key} must be ${DATABASE_NAME_RULE}`);
   return name;
 }
 
+const refusalMessage = (outcome: SessionBusy | Refused) => (isSessionBusy(outcome) ? outcome.busy : outcome.message);
+
 async function queryRows(db: Database, database: string, sql: string) {
   const outcome = await db.query(database, sql);
-  if (isSessionBusy(outcome)) throw new Error(outcome.busy);
+  if (isSessionBusy(outcome) || isRefused(outcome)) throw new Error(refusalMessage(outcome));
   return outcome.rows;
+}
+
+async function copyDatabase(db: Database, database: string, to: string) {
+  const outcome = await db.copyTo(database, to);
+  if (isSessionBusy(outcome) || isRefused(outcome)) throw new Error(refusalMessage(outcome));
+  return outcome;
 }
 
 const TOOL_HANDLERS: Record<string, ToolHandler> = {
   run_sql: (db, database, args) => queryRows(db, database, stringParam(args, "sql")),
   list_tables: (db, database) => queryRows(db, database, LIST_TABLES_SQL),
   delete_database: (db, database) => db.destroy(database),
+  [COPY_TOOL]: (db, database, args) => copyDatabase(db, database, databaseParam(args, "to")),
 };
 
 async function callTool(env: Env, access: Access, params: Params) {
   const handler = typeof params.name === "string" ? TOOL_HANDLERS[params.name] : undefined;
   if (!handler) throw new RpcError(INVALID_PARAMS, `unknown tool ${String(params.name)}`);
   const args = isRecord(params.arguments) ? params.arguments : {};
-  const database = databaseParam(args);
-  const denial = accessDenial(access, database);
+  const database = databaseParam(args, "database");
+  const denial = params.name === COPY_TOOL ? copyDenial(access) : accessDenial(access, database);
   if (denial !== undefined) return textResult(denial, true);
   try {
     return textResult(toJson(await handler(openDatabase(env, database), database, args)));

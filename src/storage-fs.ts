@@ -14,6 +14,9 @@ const DEFAULT_FILE_MODE = 0o600;
 const ROOT = "/";
 const PATH_UNDER_PREFIX = "substr(path, 1, length(?)) = ?";
 const INITIALIZED_KEY = "initialized";
+const RECEIVING_COPY_KEY = "receiving_copy";
+const BEFORE_FIRST_PATH = "";
+const BEFORE_FIRST_PAGE: PageCursor = { path: BEFORE_FIRST_PATH, idx: -1 };
 
 const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS fs_node (
@@ -44,6 +47,21 @@ interface FsNode {
   mode: number;
   size: number;
   mtime: number;
+}
+
+export interface StoredNode extends FsNode {
+  parent: string;
+}
+
+export interface StoredPage {
+  path: string;
+  idx: number;
+  data: Uint8Array;
+}
+
+interface PageCursor {
+  path: string;
+  idx: number;
 }
 
 interface BlockSpan {
@@ -104,6 +122,51 @@ export class StorageFS extends BaseFilesystem {
 
   markInitialized() {
     this.sql("INSERT OR REPLACE INTO fs_meta (key, value) VALUES (?, ?)", INITIALIZED_KEY, new Date().toISOString());
+  }
+
+  receivingCopy(): string | undefined {
+    const [row] = this.sql("SELECT value FROM fs_meta WHERE key = ?", RECEIVING_COPY_KEY);
+    return row && String(row.value);
+  }
+
+  startReceivingCopy(copyId: string) {
+    this.clear();
+    this.sql("INSERT INTO fs_meta (key, value) VALUES (?, ?)", RECEIVING_COPY_KEY, copyId);
+  }
+
+  finishReceivingCopy() {
+    this.sql("DELETE FROM fs_meta WHERE key = ?", RECEIVING_COPY_KEY);
+    this.markInitialized();
+  }
+
+  *nodeBatches(size: number): Generator<StoredNode[]> {
+    for (let after = BEFORE_FIRST_PATH; ; ) {
+      const batch = this.nodesAfter(after, size);
+      const last = batch.at(-1);
+      if (!last) return;
+      yield batch;
+      after = last.path;
+    }
+  }
+
+  *pageBatches(size: number): Generator<StoredPage[]> {
+    for (let after = BEFORE_FIRST_PAGE; ; ) {
+      const batch = this.pagesAfter(after, size);
+      const last = batch.at(-1);
+      if (!last) return;
+      yield batch;
+      after = last;
+    }
+  }
+
+  putNodes(nodes: StoredNode[]) {
+    for (const { path, parent, is_dir, mode, size, mtime } of nodes) {
+      this.sql("INSERT OR REPLACE INTO fs_node (path, parent, is_dir, mode, size, mtime) VALUES (?, ?, ?, ?, ?, ?)", path, parent, is_dir, mode, size, mtime);
+    }
+  }
+
+  putPages(pages: StoredPage[]) {
+    for (const { path, idx, data } of pages) this.sql("INSERT OR REPLACE INTO fs_block (path, idx, data) VALUES (?, ?, ?)", path, idx, data);
   }
 
   clear() {
@@ -214,6 +277,25 @@ export class StorageFS extends BaseFilesystem {
   write(fd: number, buffer: Uint8Array, offset: number, length: number, position: number) {
     const node = this.openFile(fd);
     return this.writeAt({ path: node.path, position, source: buffer, offset, length, size: node.size });
+  }
+
+  private nodesAfter(path: string, limit: number): StoredNode[] {
+    return this.sql("SELECT path, parent, is_dir, mode, size, mtime FROM fs_node WHERE path > ? ORDER BY path LIMIT ?", path, limit).map((row) => ({
+      path: String(row.path),
+      parent: String(row.parent),
+      is_dir: Number(row.is_dir),
+      mode: Number(row.mode),
+      size: Number(row.size),
+      mtime: Number(row.mtime),
+    }));
+  }
+
+  private pagesAfter(cursor: PageCursor, limit: number): StoredPage[] {
+    return this.sql("SELECT path, idx, data FROM fs_block WHERE (path, idx) > (?, ?) ORDER BY path, idx LIMIT ?", cursor.path, cursor.idx, limit).map((row) => ({
+      path: String(row.path),
+      idx: Number(row.idx),
+      data: asBytes(row.data),
+    }));
   }
 
   private routeWritesWithViews(mod: PostgresModule) {

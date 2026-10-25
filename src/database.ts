@@ -1,10 +1,11 @@
 import { DurableObject } from "cloudflare:workers";
 import { messages, Mutex, type PGlite } from "@electric-sql/pglite";
-import { checkpointIfWalFull, createPostgres, wasmMemoryMegabytes } from "./postgres";
+import { copyStorage } from "./copy-storage";
+import { checkpointIfWalFull, checkpointNow, createPostgres, wasmMemoryMegabytes } from "./postgres";
 import { SWITCHING_PROTOCOLS } from "./http-status";
 import { MB } from "./postgres-settings";
 import { errorMessage } from "./serialize";
-import { StorageFS, type SqlValue } from "./storage-fs";
+import { StorageFS, type SqlValue, type StoredNode, type StoredPage } from "./storage-fs";
 import { unpackTemplate } from "./unpack-template";
 import {
   ADMIN_SHUTDOWN,
@@ -40,6 +41,18 @@ const WIRE_IDLE_TIMEOUT_MS = WIRE_IDLE_TIMEOUT_MINUTES * MS_PER_MINUTE;
 const POSTGRES_RESTARTED = "Postgres restarted after an internal error; reconnect";
 
 export const DATABASE_NAME_HEADER = "x-pgbox-database";
+export const TARGET_EXISTS = "target_exists";
+export const DATABASE_NOT_FOUND = "database_not_found";
+export const COPY_IN_PROGRESS = "copy_in_progress";
+
+const toMegabytes = (bytes: number) => Number((bytes / MB).toFixed(STORAGE_MB_DIGITS));
+
+const wireBusy = (name: string): SessionBusy => ({ busy: `${name} has an open wire connection, so HTTP and MCP queries are refused until it disconnects` });
+
+const receivingCopy = (name: string): Refused => ({
+  refused: COPY_IN_PROGRESS,
+  message: `${name} is receiving a copy, or a copy into it was interrupted; wait for it, or delete ${name} to clear it`,
+});
 
 const toStorageValue = (value: SqlValue): SqlStorageValue => (value instanceof Uint8Array ? value.slice().buffer : value);
 
@@ -50,6 +63,8 @@ export interface Env {
 }
 
 export const openDatabase = (env: Env, name: string) => env.DB.get(env.DB.idFromName(name));
+
+type DatabaseStub = ReturnType<typeof openDatabase>;
 
 type Cell = string | number | bigint | boolean | null | object;
 
@@ -65,6 +80,26 @@ export interface SessionBusy {
 }
 
 export const isSessionBusy = (outcome: object): outcome is SessionBusy => "busy" in outcome;
+
+export interface Refused {
+  refused: typeof TARGET_EXISTS | typeof DATABASE_NOT_FOUND | typeof COPY_IN_PROGRESS;
+  message: string;
+}
+
+export const isRefused = (outcome: object): outcome is Refused => "refused" in outcome;
+
+interface CopyResult {
+  copied: string;
+  to: string;
+  pages: number;
+  copiedMB: number;
+}
+
+interface CopyRequest {
+  name: string;
+  target: string;
+  source: StorageFS;
+}
 
 interface WireConnection {
   name: string;
@@ -90,9 +125,10 @@ export class PostgresDatabase extends DurableObject<Env> {
   private session = new Mutex();
   private wire?: WireConnection;
 
-  query(name: string, sql: string): Promise<QueryResult | SessionBusy> {
+  query(name: string, sql: string): Promise<QueryResult | SessionBusy | Refused> {
     return this.session.runExclusive(async () => {
-      if (this.wire) return { busy: `${name} has an open wire connection, so HTTP and MCP queries are refused until it disconnects` };
+      if (this.wire) return wireBusy(name);
+      if (this.isReceivingCopy()) return receivingCopy(name);
       const pg = await this.boot(name);
       const { results, leftTransactionOpen } = await this.execHttp(name, pg, sql);
       if (leftTransactionOpen) throw new Error("an HTTP request can't leave a transaction open, so it was rolled back; send begin and commit in the same request");
@@ -113,6 +149,48 @@ export class PostgresDatabase extends DurableObject<Env> {
     return { deleted: name };
   }
 
+  copyTo(name: string, target: string): Promise<CopyResult | SessionBusy | Refused> {
+    return this.session.runExclusive(async () => {
+      if (this.wire) return wireBusy(name);
+      const source = this.openStorage();
+      if (source.receivingCopy() !== undefined) return receivingCopy(name);
+      if (!source.isInitialized()) return { refused: DATABASE_NOT_FOUND, message: `${name} has never been used, so there is nothing to copy` };
+      if (target === name) return { refused: TARGET_EXISTS, message: `${name} can't be copied onto itself` };
+      if (this.postgres) await this.checkpointForCopy(name, this.postgres);
+      return this.sendCopy({ name, target, source });
+    });
+  }
+
+  startCopy(name: string, copyId: string): Promise<Refused | undefined> {
+    return this.session.runExclusive(async () => {
+      const fs = this.openStorage();
+      if (this.wire || this.postgres || fs.isInitialized()) return { refused: TARGET_EXISTS, message: `${name} already exists; delete it first or copy to a new name` };
+      if (fs.receivingCopy() !== undefined) return receivingCopy(name);
+      fs.startReceivingCopy(copyId);
+      return undefined;
+    });
+  }
+
+  receiveNodes(copyId: string, nodes: StoredNode[]) {
+    this.receivingStorage(copyId).putNodes(nodes);
+  }
+
+  receivePages(copyId: string, pages: StoredPage[]) {
+    this.receivingStorage(copyId).putPages(pages);
+  }
+
+  finishCopy(copyId: string) {
+    this.receivingStorage(copyId).finishReceivingCopy();
+  }
+
+  abortCopy(name: string, copyId: string): Promise<void> {
+    return this.session.runExclusive(async () => {
+      if (this.openStorage().receivingCopy() !== copyId) return;
+      await this.ctx.storage.deleteAll();
+      console.warn(`incomplete copy into ${name} wiped`);
+    });
+  }
+
   async fetch(request: Request): Promise<Response> {
     const name = decodeURIComponent(request.headers.get(DATABASE_NAME_HEADER) ?? "");
     const { 0: client, 1: server } = new WebSocketPair();
@@ -122,6 +200,52 @@ export class PostgresDatabase extends DurableObject<Env> {
     if (this.wire) this.refuseWire(connection);
     else this.acceptWire(connection);
     return new Response(null, { status: SWITCHING_PROTOCOLS, webSocket: client });
+  }
+
+  private async sendCopy({ name, target, source }: CopyRequest): Promise<CopyResult | Refused> {
+    const destination = openDatabase(this.env, target);
+    const copyId = crypto.randomUUID();
+    const refused = await destination.startCopy(target, copyId);
+    if (refused) return refused;
+    try {
+      const copied = await copyStorage(source, {
+        putNodes: (nodes) => destination.receiveNodes(copyId, nodes),
+        putPages: (pages) => destination.receivePages(copyId, pages),
+      });
+      await destination.finishCopy(copyId);
+      console.debug(`database ${name} copied to ${target}: ${copied.pages} pages`);
+      return { copied: name, to: target, pages: copied.pages, copiedMB: toMegabytes(copied.bytes) };
+    } catch (err) {
+      await this.abandonCopy({ destination, target, copyId });
+      throw err;
+    }
+  }
+
+  private async abandonCopy({ destination, target, copyId }: { destination: DatabaseStub; target: string; copyId: string }) {
+    try {
+      await destination.abortCopy(target, copyId);
+    } catch (err) {
+      console.error(`incomplete copy into ${target} could not be wiped:`, err);
+    }
+  }
+
+  private receivingStorage(copyId: string): StorageFS {
+    const fs = this.openStorage();
+    if (fs.receivingCopy() !== copyId) throw new Error("the copy was cancelled because its target was deleted");
+    return fs;
+  }
+
+  private isReceivingCopy(): boolean {
+    return !this.postgres && this.openStorage().receivingCopy() !== undefined;
+  }
+
+  private async checkpointForCopy(name: string, booted: Promise<PGlite>) {
+    try {
+      await checkpointNow(await booted);
+    } catch (err) {
+      if (!(err instanceof messages.DatabaseError)) this.discardPostgres(name, err);
+      throw err;
+    }
   }
 
   private async execHttp(name: string, pg: PGlite, sql: string) {
@@ -276,7 +400,7 @@ export class PostgresDatabase extends DurableObject<Env> {
   }
 
   private storageMegabytes(): number {
-    return Number((this.ctx.storage.sql.databaseSize / MB).toFixed(STORAGE_MB_DIGITS));
+    return toMegabytes(this.ctx.storage.sql.databaseSize);
   }
 
   private async closePostgres(name: string) {
@@ -313,9 +437,14 @@ export class PostgresDatabase extends DurableObject<Env> {
     console.error(`postgres for ${name} discarded after:`, err);
   }
 
-  private async start(name: string): Promise<PGlite> {
+  private openStorage(): StorageFS {
     const storage = this.ctx.storage.sql;
-    const fs = new StorageFS((query, ...bindings) => storage.exec(query, ...bindings.map(toStorageValue)).toArray());
+    return new StorageFS((query, ...bindings) => storage.exec(query, ...bindings.map(toStorageValue)).toArray());
+  }
+
+  private async start(name: string): Promise<PGlite> {
+    const fs = this.openStorage();
+    if (fs.receivingCopy() !== undefined) throw new Error(receivingCopy(name).message);
     this.startedFromTemplate = !fs.isInitialized();
     if (this.startedFromTemplate) await this.loadTemplate(fs);
     const pg = await createPostgres({ fs, onLog: (line) => console.debug(`postgres ${name}: ${line}`) });

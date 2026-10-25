@@ -72,7 +72,11 @@ export function createPostgres({ fs, onLog }: PostgresOptions): Promise<PGlite> 
 export async function checkpointIfWalFull(pg: PGlite): Promise<void> {
   if (pg.isInTransaction()) return;
   const { rows } = await pg.query<{ bytes: number }>(WAL_SINCE_CHECKPOINT_SQL);
-  if ((rows[0]?.bytes ?? 0) > MAX_WAL_MB * MB) await pg.exec(CHECKPOINT_SQL);
+  if ((rows[0]?.bytes ?? 0) > MAX_WAL_MB * MB) await checkpointNow(pg);
+}
+
+export async function checkpointNow(pg: PGlite): Promise<void> {
+  await pg.exec(CHECKPOINT_SQL);
 }
 
 export function wasmMemoryMegabytes(pg: PGlite): number {
