@@ -77,7 +77,7 @@ The traffic between the proxy and the Worker is TLS when `PGBOX_URL` is `https:/
 
 What to expect:
 
-- One wire connection per database at a time. A second one gets `too many connections` (SQLSTATE 53300) and is closed. Set your ORM's pool size to 1.
+- One wire connection per database at a time. A second one gets `too many connections` (SQLSTATE 53300) and is closed, so limit your client to one connection (below).
 - While a wire connection is open, HTTP queries to that database get a 409 (`wire_connection_open`) and MCP calls get a tool error instead of running, because the connection and those queries would share one Postgres session. Disconnect to use them again.
 - An HTTP or MCP request can't leave a transaction open. If one does (`begin` without `commit`, or an error after `begin`), it is rolled back and the request fails, so the next wire connection never starts inside someone else's transaction.
 - Disconnecting rolls back any open transaction, including a batch that never reached its Sync, and runs `discard all`.
@@ -87,7 +87,21 @@ What to expect:
 - Query cancellation (Ctrl-C in `psql`) doesn't work: the cancel request arrives as a second connection and is refused.
 - A single response is held in memory before it's sent, so select large results in pages.
 - The Durable Object stays awake for as long as the connection is open, so an idle connection is billed as active time.
-- Prisma's `migrate dev` needs a shadow database it can create, which pgbox can't. `prisma db push` and `prisma migrate deploy` don't need one.
+- `LISTEN`/`NOTIFY` works, but only within that one connection, since there is never a second session to notify from.
+
+Each client sets its connection limit in a different place. Without it, parallel queries open a second connection and fail:
+
+- node-postgres and Drizzle: `new Pool({ connectionString, max: 1 })`.
+- Prisma 7 needs the `@prisma/adapter-pg` driver adapter, and ignores `connection_limit` in the URL: `new PrismaClient({ adapter: new PrismaPg({ connectionString, max: 1 }) })`.
+- Prisma 6: add `?connection_limit=1&sslmode=disable` to the URL.
+
+`drizzle-kit push`/`migrate` and the Prisma CLI use one connection and need no settings. Prisma's `migrate dev` needs a shadow database it can create, which pgbox can't, so write migrations with `migrate diff` and apply them with `migrate deploy` (in Prisma 7, `db push` no longer runs `generate`, so run that yourself):
+
+```sh
+mkdir -p prisma/migrations/0001_init
+npx prisma migrate diff --from-empty --to-schema prisma/schema.prisma --script > prisma/migrations/0001_init/migration.sql
+npx prisma migrate deploy
+```
 
 ## Run it
 
@@ -111,7 +125,8 @@ npm run deploy
 
 - Each Durable Object gets about 128 MB of memory, shared with others in the same isolate. Postgres uses about 46 MB.
 - One database has been tested past 200 MB.
-- 100 new databases started at the same moment: all came up in one run, 99 in another. More than that hasn't been tested.
+- 50 to 100 brand-new databases started in the same second can lose a few percent to `Durable Object's isolate exceeded its memory limit and was reset` (a 500), because Cloudflare decides how many share an isolate. Retry those requests if they're safe to repeat. 10 at once has never failed.
+- The clock doesn't advance while a query runs, so `pg_sleep` of any length spins until Cloudflare resets the database for CPU time (about 30 s; the data survives), and `statement_timeout` and the other timeouts never fire. Any query that takes that long is reset the same way.
 - Every database starts at about 10.6 MB of storage, so 5 GB holds about 470 of them. Past that, storage runs about 20 MB above the data size (203 MB of data took 226 MB).
 - There are no template databases, so `create database` fails. Use schemas, another name, or a copy.
 
