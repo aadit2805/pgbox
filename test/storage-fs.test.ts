@@ -2,11 +2,10 @@ import { strict as assert } from "node:assert";
 import { readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DatabaseSync, type SQLInputValue, type SQLOutputValue } from "node:sqlite";
 import { PGlite } from "@electric-sql/pglite";
 import { MB, POSTGRES_SETTINGS } from "../src/postgres-settings.ts";
-import { StorageFS, type SqlExec, type SqlValue } from "../src/storage-fs.ts";
 import { unpackTemplate } from "../src/unpack-template.ts";
+import { openStorage as openNodeStorage } from "./node-storage.ts";
 
 const DB_FILE = join(tmpdir(), "pgbox-storage-fs-test.sqlite");
 const TEMPLATE = "public/template.tar.gz";
@@ -17,21 +16,7 @@ const UPDATED_ID = 7;
 const SHORT_FILE_BYTES = 100;
 const GROWN_FILE_BYTES = 16_384;
 
-const toInput = (value: SqlValue): SQLInputValue => (value instanceof ArrayBuffer ? new Uint8Array(value) : value);
-const toOutput = (value: SQLOutputValue): SqlValue => (typeof value === "bigint" ? Number(value) : value);
-
-function openStorage() {
-  const db = new DatabaseSync(DB_FILE);
-  const sql: SqlExec = (query, ...bindings) => {
-    const statement = db.prepare(query);
-    if (!statement.columns().length) {
-      statement.run(...bindings.map(toInput));
-      return [];
-    }
-    return statement.all(...bindings.map(toInput)).map((row) => Object.fromEntries(Object.entries(row).map(([key, value]) => [key, toOutput(value)])));
-  };
-  return { db, fs: new StorageFS(sql) };
-}
+const openStorage = () => openNodeStorage(DB_FILE);
 
 async function timed<T>(label: string, run: () => Promise<T>): Promise<T> {
   const started = Date.now();
