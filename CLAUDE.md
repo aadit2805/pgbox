@@ -3,11 +3,12 @@
 One Cloudflare Worker, one Durable Object class. `POST /<name>` with SQL in the body runs it
 against that name's own Postgres; a new name gets a new, empty database. `DELETE /<name>` wipes
 that database's storage. `POST /<name>/token[?ttl=<seconds>|never]` (admin token only) mints a
-token scoped to that one name, lasting 30 days by default. Over HTTP an out-of-scope name is a
+token scoped to that one name, lasting 30 days by default. `POST /<name>/copy?to=<new-name>`
+(admin token only) copies that database to a name that has never been used. Over HTTP an out-of-scope name is a
 403; over MCP it is a tool error (`isError`). `GET /<name>/wire` upgrades to a WebSocket whose binary frames are
 raw Postgres protocol bytes, one connection per database at a time; `scripts/proxy.mjs` exposes
 it as a local TCP port for psql and ORMs. `POST /mcp` is a stateless MCP server (JSON
-responses, no SSE) exposing `run_sql`, `list_tables` and `delete_database`; the name `mcp` is
+responses, no SSE) exposing `run_sql`, `list_tables`, `delete_database` and `copy_database`; the name `mcp` is
 reserved for it. Database names are 1 to 128 characters with no `/` and never `mcp`, on every
 route (`database-name.ts`). Each Durable Object runs PGlite (Postgres compiled to wasm) and keeps
 its data directory in the object's SQLite storage, one row per 8 KB page, so memory holds only
@@ -23,7 +24,9 @@ TypeScript, strict, no `any`. Node 24 (`.nvmrc`; `nvm use`); Wrangler refuses ol
   expiry, garbage payloads), `test/wire.test.ts` (framing across and within frames, no early
   ReadyForQuery, COPY FROM failing cleanly, session reset, message cap, on real PGlite), then
   `test/storage-fs.test.ts`: real PGlite on `node:sqlite`
-  through `StorageFS` (fresh boot from the template, 250k rows, reopen, update survives reopen).
+  through `StorageFS` (fresh boot from the template, 250k rows, reopen, update survives reopen),
+  then `test/copy-storage.test.ts` (copy with and without a checkpoint boots with the same
+  checksum, writes stay separate, an interrupted copy stays uninitialized).
 - `npm run deploy` — `wrangler deploy` (builds the template first). Workers Builds runs it on
   every push to `main`, so a push is a production deploy.
 - `PGBOX_URL=https://… node scripts/loadtest.mjs [growth|fanout|all]` — against the deployed
@@ -40,8 +43,8 @@ TypeScript, strict, no `any`. Node 24 (`.nvmrc`; `nvm use`); Wrangler refuses ol
 
 ```
 src/
-  index.ts             fetch handler: route /<name> and /<name>/wire to its Durable Object, mint /<name>/token
-  access.ts            request -> Access (admin or scoped to one name); accessDenial, authorizeDatabase
+  index.ts             fetch handler: route /<name>, /<name>/wire and /<name>/copy to its Durable Object, mint /<name>/token
+  access.ts            request -> Access (admin or scoped to one name); accessDenial, copyDenial, authorizeDatabase
   scoped-token.ts      stateless pgbox_<payload>.<HMAC> tokens, signed with a key derived from PGBOX_TOKEN
   database-name.ts     isDatabaseName and MCP_NAME, shared by every route and the token payload
   http-status.ts       every HTTP status code the Worker returns
@@ -49,6 +52,7 @@ src/
   wire.ts              Postgres protocol framing: MessageReader, exchange (PGlite reply rewriting), endSession, error responses
   postgres.ts          createPostgres({ fs, onLog }): PGlite with the Workers shims
   unpack-template.ts   streams the gzipped template tar into StorageFS one page at a time
+  copy-storage.ts      copyStorage: streams one StorageFS's rows to a destination in 4 MB batches
   postgres-settings.ts POSTGRES_SETTINGS (small caches, capped WAL, quiet logs), shared with the test and template build
   storage-fs.ts        StorageFS: PGlite filesystem on a synchronous SQL exec (DO storage or node:sqlite)
   mcp.ts               MCP over HTTP: JSON-RPC initialize, tools/list, tools/call
@@ -119,6 +123,11 @@ Each is a hard limit of the Workers runtime, found by running it, not guessed:
 - Every PGlite call in `PostgresDatabase` runs inside `this.session.runExclusive`. Never nest it.
   HTTP and MCP never share the session with an open wire connection, and never leave a
   transaction open for the next user.
+- A copy runs inside the source's `session` after a checkpoint and streams `fs_node` then
+  `fs_block` rows to the target Durable Object over RPC, `COPY_BATCH_MB` at a time. The target
+  holds a `receiving_copy` marker instead of `initialized` until the last batch lands, refuses
+  queries and boots meanwhile, and every batch checks the marker's copy id, so a target deleted
+  mid-copy stops it. On failure the source calls `abortCopy`, which wipes the target.
 - Wire limits are named constants: `MAX_MESSAGE_MB` and `MAX_QUEUED_MB` in `wire.ts`,
   `WIRE_IDLE_TIMEOUT_MINUTES` in `database.ts`. Queued bytes are counted outside the mutex.
 - Scoped tokens are stateless: nothing stores or lists them. Rotating `PGBOX_TOKEN` revokes every

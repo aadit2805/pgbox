@@ -14,7 +14,7 @@ A new name gets a new, empty database. `DELETE /my-agent` wipes it. The name `mc
 
 ## Use it from an agent
 
-`/mcp` is an MCP server with three tools: `run_sql`, `list_tables` and `delete_database`. To add it to Claude Code:
+`/mcp` is an MCP server with four tools: `run_sql`, `list_tables`, `delete_database` and `copy_database` (admin token only). To add it to Claude Code:
 
 ```sh
 claude mcp add --transport http pgbox https://<your-worker>.workers.dev/mcp \
@@ -35,7 +35,7 @@ curl -X POST "https://<your-worker>.workers.dev/my-agent/token?ttl=86400" \
 
 `ttl` is in seconds, up to one year. Without it a token lasts 30 days. `ttl=never` makes one that never expires. `expiresAt` is a Unix time, or `null` for a token that never expires.
 
-A scoped token can `POST` and `DELETE` its own database and nothing else. Over HTTP, any other name gets a 403, and so does minting a token. Over MCP it can only pass its own name as `database`. Any other name comes back as a tool error (`isError: true`) instead of a 403:
+A scoped token can `POST` and `DELETE` its own database and nothing else. Over HTTP, any other name gets a 403, and so does minting a token or copying a database. Over MCP it can only pass its own name as `database`. Any other name comes back as a tool error (`isError: true`) instead of a 403:
 
 ```sh
 claude mcp add --transport http pgbox-my-agent https://<your-worker>.workers.dev/mcp \
@@ -43,6 +43,23 @@ claude mcp add --transport http pgbox-my-agent https://<your-worker>.workers.dev
 ```
 
 Tokens are signed with a key derived from `PGBOX_TOKEN` and aren't stored anywhere, so one can't be revoked on its own. Changing `PGBOX_TOKEN` revokes all of them.
+
+## Copy a database
+
+```sh
+curl -X POST "https://<your-worker>.workers.dev/my-agent/copy?to=my-agent-test" \
+  -H "Authorization: Bearer $PGBOX_TOKEN"
+# {"copied":"my-agent","to":"my-agent-test","pages":23528,"copiedMB":183.7}
+```
+
+The copy is a separate database, so writes to one never reach the other. It's useful for trying a migration before running it for real.
+
+- Only `PGBOX_TOKEN` can copy. A scoped token can't, because a copy reads one name and creates another.
+- The new name must never have been used. If it has, the copy gets a 409 (`target_exists`) and nothing is overwritten; delete it first. Copying a name that was never used is a 404.
+- The copy is a consistent snapshot. Queries to the source wait until it finishes, and it gets a 409 (`wire_connection_open`) while the source has a wire connection open.
+- Pages move 4 MB at a time, so memory doesn't limit the size: a 204 MB database copied in about 8 seconds.
+- Until the copy finishes, the new name answers with a 409 (`copy_in_progress`). A copy that fails partway is wiped. If the Worker dies mid-copy, the new name stays in that state until you delete it.
+- A copy stores as much as its source, so copying a database doubles its storage.
 
 ## Connect with psql or an ORM
 
@@ -96,7 +113,7 @@ npm run deploy
 - One database has been tested past 200 MB.
 - 100 new databases started at the same moment: all came up in one run, 99 in another. More than that hasn't been tested.
 - Every database starts at about 10.6 MB of storage, so 5 GB holds about 470 of them. Past that, storage runs about 20 MB above the data size (203 MB of data took 226 MB).
-- There are no template databases, so `create database` fails. Use schemas, or another name.
+- There are no template databases, so `create database` fails. Use schemas, another name, or a copy.
 
 ## License
 
