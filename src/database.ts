@@ -9,6 +9,7 @@ import { StorageFS, type SqlValue, type StoredNode, type StoredPage } from "./st
 import { unpackTemplate } from "./unpack-template";
 import {
   ADMIN_SHUTDOWN,
+  CANNOT_CONNECT_NOW,
   closeWithError,
   endSession,
   exchange,
@@ -53,6 +54,8 @@ const receivingCopy = (name: string): Refused => ({
   refused: COPY_IN_PROGRESS,
   message: `${name} is receiving a copy, or a copy into it was interrupted; wait for it, or delete ${name} to clear it`,
 });
+
+const sendingCopy = (name: string): Refused => ({ refused: COPY_IN_PROGRESS, message: `${name} is being copied; delete it after the copy finishes` });
 
 const toStorageValue = (value: SqlValue): SqlStorageValue => (value instanceof Uint8Array ? value.slice().buffer : value);
 
@@ -124,6 +127,7 @@ export class PostgresDatabase extends DurableObject<Env> {
   private startedFromTemplate = false;
   private session = new Mutex();
   private wire?: WireConnection;
+  private copying = false;
 
   query(name: string, sql: string): Promise<QueryResult | SessionBusy | Refused> {
     return this.session.runExclusive(async () => {
@@ -137,7 +141,8 @@ export class PostgresDatabase extends DurableObject<Env> {
     });
   }
 
-  async destroy(name: string): Promise<{ deleted: string }> {
+  async destroy(name: string): Promise<{ deleted: string } | Refused> {
+    if (this.copying) return sendingCopy(name);
     await this.ctx.blockConcurrencyWhile(() =>
       this.session.runExclusive(async () => {
         this.dropWire({ code: ADMIN_SHUTDOWN, message: `${name} was deleted` });
@@ -157,18 +162,21 @@ export class PostgresDatabase extends DurableObject<Env> {
       if (!source.isInitialized()) return { refused: DATABASE_NOT_FOUND, message: `${name} has never been used, so there is nothing to copy` };
       if (target === name) return { refused: TARGET_EXISTS, message: `${name} can't be copied onto itself` };
       if (this.postgres) await this.checkpointForCopy(name, this.postgres);
-      return this.sendCopy({ name, target, source });
+      this.copying = true;
+      try {
+        return await this.sendCopy({ name, target, source });
+      } finally {
+        this.copying = false;
+      }
     });
   }
 
-  startCopy(name: string, copyId: string): Promise<Refused | undefined> {
-    return this.session.runExclusive(async () => {
-      const fs = this.openStorage();
-      if (this.wire || this.postgres || fs.isInitialized()) return { refused: TARGET_EXISTS, message: `${name} already exists; delete it first or copy to a new name` };
-      if (fs.receivingCopy() !== undefined) return receivingCopy(name);
-      fs.startReceivingCopy(copyId);
-      return undefined;
-    });
+  startCopy(name: string, copyId: string): Refused | undefined {
+    const fs = this.openStorage();
+    if (this.wire || this.postgres || fs.isInitialized()) return { refused: TARGET_EXISTS, message: `${name} already exists; delete it first or copy to a new name` };
+    if (fs.receivingCopy() !== undefined) return receivingCopy(name);
+    fs.startReceivingCopy(copyId);
+    return undefined;
   }
 
   receiveNodes(copyId: string, nodes: StoredNode[]) {
@@ -197,7 +205,8 @@ export class PostgresDatabase extends DurableObject<Env> {
     server.binaryType = BINARY_TYPE;
     server.accept();
     const connection: WireConnection = { name, socket: server, reader: new MessageReader(), queuedBytes: 0 };
-    if (this.wire) this.refuseWire(connection);
+    if (this.wire) this.refuseWire(connection, { code: TOO_MANY_CONNECTIONS, message: `${name} already has an open wire connection; pgbox allows one per database at a time` });
+    else if (this.isReceivingCopy()) this.refuseWire(connection, { code: CANNOT_CONNECT_NOW, message: receivingCopy(name).message });
     else this.acceptWire(connection);
     return new Response(null, { status: SWITCHING_PROTOCOLS, webSocket: client });
   }
@@ -291,28 +300,28 @@ export class PostgresDatabase extends DurableObject<Env> {
     });
   }
 
-  private refuseWire(connection: WireConnection) {
+  private refuseWire(connection: WireConnection, error: WireError) {
     const { name, socket, reader } = connection;
     socket.addEventListener("message", (event) => {
       try {
-        this.answerRefused(connection, readMessages(reader, event.data));
+        this.answerRefused(connection, error, readMessages(reader, event.data));
       } catch (err) {
         this.failWire(connection, err);
       }
     });
     socket.addEventListener("close", () => clearTimeout(connection.idleTimer));
     this.armIdleTimer(connection);
-    console.warn(`second wire connection to ${name} refused`);
+    console.warn(`wire connection to ${name} refused: ${error.message}`);
   }
 
-  private answerRefused({ name, socket, idleTimer }: WireConnection, received: WireMessage[]) {
+  private answerRefused({ socket, idleTimer }: WireConnection, error: WireError, received: WireMessage[]) {
     for (const message of received) {
       if (message.kind === "encryption") {
         sendFrames(socket, NO_ENCRYPTION);
         continue;
       }
       clearTimeout(idleTimer);
-      closeWithError(socket, { code: TOO_MANY_CONNECTIONS, message: `${name} already has an open wire connection; pgbox allows one per database at a time` });
+      closeWithError(socket, error);
       return;
     }
   }

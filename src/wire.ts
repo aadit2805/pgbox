@@ -39,6 +39,7 @@ export const MAX_QUEUED_MB = 8;
 export const MAX_QUEUED_BYTES = MAX_QUEUED_MB * MB;
 export const NO_ENCRYPTION = new Uint8Array([charCode("N")]);
 export const TOO_MANY_CONNECTIONS = "53300";
+export const CANNOT_CONNECT_NOW = "57P03";
 export const PROTOCOL_VIOLATION = "08P01";
 export const ADMIN_SHUTDOWN = "57P01";
 export const IDLE_SESSION_TIMEOUT = "57P05";

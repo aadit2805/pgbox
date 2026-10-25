@@ -57,7 +57,7 @@ The copy is a separate database, so writes to one never reach the other. It's us
 - Only `PGBOX_TOKEN` can copy. A scoped token can't, because a copy reads one name and creates another.
 - The new name must never have been used. If it has, the copy gets a 409 (`target_exists`) and nothing is overwritten; delete it first. Copying a name that was never used is a 404.
 - The copy is a consistent snapshot. Queries to the source wait until it finishes, and it gets a 409 (`wire_connection_open`) while the source has a wire connection open.
-- Pages move 4 MB at a time, so memory doesn't limit the size: a 204 MB database copied in about 8 seconds.
+- Pages move 4 MB at a time, so memory stays flat. A 204 MB database copied in about 8 seconds; larger ones haven't been tested. A copy cut off by Cloudflare's 30-second CPU limit leaves the new name stuck, as described next.
 - Until the copy finishes, the new name answers with a 409 (`copy_in_progress`). A copy that fails partway is wiped. If the Worker dies mid-copy, the new name stays in that state until you delete it.
 - A copy stores as much as its source, so copying a database doubles its storage.
 

@@ -115,10 +115,16 @@ async function copyDatabase(db: Database, database: string, to: string) {
   return outcome;
 }
 
+async function deleteDatabase(db: Database, database: string) {
+  const outcome = await db.destroy(database);
+  if (isRefused(outcome)) throw new Error(outcome.message);
+  return outcome;
+}
+
 const TOOL_HANDLERS: Record<string, ToolHandler> = {
   run_sql: (db, database, args) => queryRows(db, database, stringParam(args, "sql")),
   list_tables: (db, database) => queryRows(db, database, LIST_TABLES_SQL),
-  delete_database: (db, database) => db.destroy(database),
+  delete_database: deleteDatabase,
   [COPY_TOOL]: (db, database, args) => copyDatabase(db, database, databaseParam(args, "to")),
 };
 
